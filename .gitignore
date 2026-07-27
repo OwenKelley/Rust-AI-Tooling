@@ -1,0 +1,20 @@
+/target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+python/*.egg-info/
+*.egg-info/
+dist/
+build/
+results/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,4 @@
+# Prefer CPU-specific codegen for local benches (AVX2/FMA, etc.).
+# Remove or override if you need portable binaries.
+[build]
+rustflags = ["-C", "target-cpu=native"]

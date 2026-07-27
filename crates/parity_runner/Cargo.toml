@@ -1,0 +1,17 @@
+[package]
+name = "parity_runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runs rnumpy ops and emits JSON timings/checksums for Python comparison"
+
+[[bin]]
+name = "parity_runner"
+path = "src/main.rs"
+
+[dependencies]
+rnumpy = { path = "../rnumpy" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,13 @@
+[project]
+name = "rust-ai-tooling-python"
+version = "0.1.0"
+description = "Python reference side for Rust AI tooling parity tests"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["core_numerical"]
