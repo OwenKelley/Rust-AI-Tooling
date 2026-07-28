@@ -83,8 +83,12 @@ Performance work prefers **in-house `std` kernels** over extra crates:
 
 - release `lto = fat`, `codegen-units = 1`, `target-cpu=native`
 - contiguous slice scans for `min`/`max`/`argmin`/`argmax`
-- `crates/rnumpy/src/gemm.rs`: blocked + `std::thread` parallel GEMM / dot
-  (no rayon, no OpenBLAS/MKL)
+- `crates/rnumpy/src/gemm.rs`: in-house GEMM (`std` only)
+  - pack each 8-col B panel once, then AVX2+FMA 4×8 microkernel
+  - `std::thread` row parallelism only above a high flop threshold
+    (avoids spawn-inside-column-loop overhead)
+  - Goto A/B packing reserved for very large shapes
+  - no rayon / OpenBLAS / MKL
 
 `ndarray` remains only as the array **container** (still pulls `matrixmultiply`
 transitively, but `matmul`/`dot` do not call into it). Replacing that storage
