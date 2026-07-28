@@ -4,16 +4,3 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "NumPy-like numerical API for Rust (1:1 mapping target)"
-
-[dependencies]
-ndarray = { workspace = true }
-
-[dev-dependencies]
-approx = { workspace = true }
-criterion = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-
-[[bench]]
-name = "ops"
-harness = false

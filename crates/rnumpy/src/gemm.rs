@@ -17,7 +17,7 @@ const NC: usize = 256;
 const KC: usize = 256;
 
 /// Parallelize only for large GEMMs; medium sizes stay serial (spawn cost dominates).
-const PARALLEL_FLOPS: u64 = 80_000_000;
+const PARALLEL_FLOPS: u64 = 8_000_000;
 
 #[derive(Clone, Copy)]
 enum Isa {

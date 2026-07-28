@@ -1,21 +1,20 @@
 //! Array creation — mirrors `numpy` constructors.
 
 use crate::NdArray;
-use ndarray::{Array, ArrayD, IxDyn};
 
 /// `np.zeros(shape)`
 pub fn zeros(shape: &[usize]) -> NdArray {
-    ArrayD::zeros(IxDyn(shape))
+    NdArray::zeros(shape)
 }
 
 /// `np.ones(shape)`
 pub fn ones(shape: &[usize]) -> NdArray {
-    ArrayD::ones(IxDyn(shape))
+    NdArray::ones(shape)
 }
 
 /// `np.full(shape, fill_value)`
 pub fn full(shape: &[usize], fill_value: f64) -> NdArray {
-    ArrayD::from_elem(IxDyn(shape), fill_value)
+    NdArray::from_elem(shape, fill_value)
 }
 
 /// `np.arange(start, stop, step)` — exclusive `stop`, like NumPy.
@@ -35,20 +34,20 @@ pub fn arange(start: f64, stop: f64, step: f64) -> NdArray {
             x += step;
         }
     }
-    Array::from_vec(values).into_dyn()
+    NdArray::from_vec(values)
 }
 
 /// `np.linspace(start, stop, num)` — inclusive endpoints.
 pub fn linspace(start: f64, stop: f64, num: usize) -> NdArray {
     if num == 0 {
-        return ArrayD::zeros(IxDyn(&[0]));
+        return NdArray::zeros(&[0]);
     }
     if num == 1 {
-        return Array::from_vec(vec![start]).into_dyn();
+        return NdArray::from_vec(vec![start]);
     }
     let step = (stop - start) / (num as f64 - 1.0);
     let values: Vec<f64> = (0..num).map(|i| start + step * i as f64).collect();
-    Array::from_vec(values).into_dyn()
+    NdArray::from_vec(values)
 }
 
 /// `np.eye(n)` — 2D identity.
@@ -65,7 +64,11 @@ pub fn eye(n: usize) -> NdArray {
 /// depending on NumPy's RNG stream.
 pub fn seeded_uniform(shape: &[usize], seed: u64, low: f64, high: f64) -> NdArray {
     let mut state = seed;
-    let total: usize = shape.iter().product();
+    let total: usize = if shape.is_empty() {
+        1
+    } else {
+        shape.iter().product()
+    };
     let mut data = Vec::with_capacity(total);
     let span = high - low;
     for _ in 0..total {
@@ -75,19 +78,19 @@ pub fn seeded_uniform(shape: &[usize], seed: u64, low: f64, high: f64) -> NdArra
         let u = ((state >> 8) & 0xFF_FFFF) as f64 / ((1u64 << 24) as f64);
         data.push(low + span * u);
     }
-    Array::from_shape_vec(IxDyn(shape), data).expect("shape product matches data len")
+    NdArray::from_shape_vec(shape, data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use approx::assert_abs_diff_eq;
+    use crate::test_util::assert_abs_diff_eq;
 
     #[test]
     fn zeros_shape() {
         let a = zeros(&[2, 3]);
         assert_eq!(a.shape(), &[2, 3]);
-        assert!(a.iter().all(|&x| x == 0.0));
+        assert!(a.iter().all(|x| x == 0.0));
     }
 
     #[test]
@@ -99,8 +102,8 @@ mod tests {
     #[test]
     fn linspace_endpoints() {
         let a = linspace(0.0, 1.0, 5);
-        assert_abs_diff_eq!(a[0], 0.0, epsilon = 1e-12);
-        assert_abs_diff_eq!(a[4], 1.0, epsilon = 1e-12);
+        assert_abs_diff_eq(a[0], 0.0, 1e-12);
+        assert_abs_diff_eq(a[4], 1.0, 1e-12);
     }
 
     #[test]

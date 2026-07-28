@@ -22,26 +22,73 @@ OPS = [
     "linspace",
     "eye",
     "add",
+    "add_broadcast",
     "subtract",
     "multiply",
     "divide",
     "power",
+    "maximum",
+    "minimum",
+    "greater",
+    "less",
+    "equal",
+    "not_equal",
     "sqrt",
     "exp",
     "log",
+    "sin",
+    "cos",
+    "tan",
+    "tanh",
     "negative",
     "abs",
+    "sign",
+    "square",
+    "reciprocal",
+    "floor",
+    "ceil",
+    "trunc",
+    "round",
+    "clip",
+    "where",
     "sum",
+    "sum_axis",
     "mean",
+    "mean_axis",
     "min",
+    "min_axis",
     "max",
+    "max_axis",
     "var",
     "std",
     "argmin",
     "argmax",
+    "cumsum",
+    "cumsum_axis",
+    "cumprod",
     "transpose",
+    "reshape",
+    "reshape_infer",
+    "ravel",
+    "concatenate",
+    "stack",
+    "broadcast_to",
+    "swapaxes",
+    "moveaxis",
     "matmul",
     "dot",
+    "trace",
+    "norm",
+    "solve",
+    "inv",
+    "det",
+    "qr",
+    "svdvals",
+    "eigvalsh",
+    "take",
+    "compress",
+    "slice",
+    "astype_f32",
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -125,7 +172,13 @@ def time_rust(
     return json.loads(proc.stdout)
 
 
-def nearly_equal(a: float, b: float, rtol: float = 1e-7, atol: float = 1e-8) -> bool:
+def nearly_equal(a: float | None, b: float | None, rtol: float = 1e-7, atol: float = 1e-8) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    if not math.isfinite(a) or not math.isfinite(b):
+        return math.isnan(a) and math.isnan(b) or (
+            math.isinf(a) and math.isinf(b) and (a > 0) == (b > 0)
+        )
     if math.isnan(a) and math.isnan(b):
         return True
     return abs(a - b) <= atol + rtol * abs(b)

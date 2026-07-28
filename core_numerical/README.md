@@ -23,13 +23,27 @@ and **speed**.
 | `np.arange(start, stop, step)` | `rnumpy::arange(start, stop, step)` |
 | `np.linspace(start, stop, num)` | `rnumpy::linspace(start, stop, num)` |
 | `np.eye(n)` | `rnumpy::eye(n)` |
-| `np.add` / `subtract` / `multiply` / `divide` | `rnumpy::{add,subtract,multiply,divide}` |
-| `np.power` / `sqrt` / `exp` / `log` | `rnumpy::{power,sqrt,exp,log}` |
-| `np.negative` / `abs` | `rnumpy::{negative,abs}` |
+| `np.add` / `subtract` / `multiply` / `divide` | `rnumpy::{add,subtract,multiply,divide}` (broadcasting) |
+| `np.sign` / `square` / `reciprocal` / `floor` / `ceil` / `trunc` / `round` | `rnumpy::{sign,square,reciprocal,floor,ceil,trunc,round}` |
+| `np.greater` / `less` / `equal` / `not_equal` | `rnumpy::{greater,less,equal,not_equal}` (float 0/1 masks) |
+| `np.cumsum` / `cumprod` (+ axis) | `rnumpy::{cumsum,cumsum_axis,cumprod}` |
+| `np.reshape` (incl. `-1`) | `rnumpy::{reshape,reshape_infer}` |
+| `np.swapaxes` / `moveaxis` | `rnumpy::{swapaxes,moveaxis}` |
+| `np.transpose` / `swapaxes` | O(1) strided views (`transpose_view` / `swapaxes_view`) |
+| `a[start:stop]` slicing | `rnumpy::slice_array` / `NdArray::slice` |
+| `np.take` / `np.compress` | `rnumpy::{take,compress}` |
+| `np.linalg.qr` / `svd` (values) / `eigvalsh` | `rnumpy::{qr,svdvals,eigvalsh}` |
+| `astype(float32)` | `NdArray::astype_f32` / `NdArrayF32` |
+| `np.linalg.solve` / `inv` / `det` | `rnumpy::{solve,inv,det}` |
+| `np.sqrt` / `exp` / `log` / `sin` / `cos` / `tan` / `tanh` | `rnumpy::{sqrt,exp,log,sin,cos,tan,tanh}` |
+| `np.negative` / `abs` / `clip` | `rnumpy::{negative,abs,clip}` |
+| `np.where` | `rnumpy::where_` |
 | `np.sum` / `mean` / `min` / `max` | `rnumpy::{sum,mean,min,max}` |
+| `np.sum/mean/min/max(..., axis=)` | `rnumpy::{sum_axis,mean_axis,min_axis,max_axis}` |
 | `np.var` / `std` (ddof=0) | `rnumpy::{var,std}` |
 | `np.argmin` / `argmax` | `rnumpy::{argmin,argmax}` |
-| `np.transpose` | `rnumpy::transpose` |
+| `np.transpose` / `reshape` / `ravel` | `rnumpy::{transpose,reshape,ravel}` |
+| `np.concatenate` / `stack` / `broadcast_to` | `rnumpy::{concatenate,stack,broadcast_to}` |
 | `np.matmul` / `np.dot` | `rnumpy::{matmul,dot}` |
 
 Shared inputs use the same LCG (`seeded_uniform`) on both sides so checksums
@@ -66,11 +80,8 @@ Useful flags:
 - `--size 1024` — problem size
 - `--json-out ..\results\numpy_parity.json` — save machine-readable report
 
-Optional Rust-only microbench:
-
-```powershell
-cargo bench -p rnumpy
-```
+Timing for Rust ops is covered by `parity_runner` (and the Python compare harness);
+there is no separate Criterion bench crate.
 
 ## Pass criteria
 
@@ -90,13 +101,13 @@ Performance work prefers **in-house `std` kernels** over extra crates:
   - Goto A/B packing reserved for very large shapes
   - no rayon / OpenBLAS / MKL
 
-`ndarray` remains only as the array **container** (still pulls `matrixmultiply`
-transitively, but `matmul`/`dot` do not call into it). Replacing that storage
-with a pure `Vec`+shape type is the next dependency-reduction step.
+Array storage is a local contiguous `NdArray` (`Vec<f64>` + shape) in
+`crates/rnumpy/src/array.rs` — no `ndarray` / BLAS crate dependency.
 
 `transpose` still materializes an owned array; NumPy often returns an O(1) view.
 
 ## Next in Core Numerical
 
-After NumPy coverage deepens (broadcasting, advanced indexing, `np.linalg.*`),
-mirror the same harness pattern for SciPy, Pandas, Polars, and PyArrow.
+Still ahead for deeper NumPy parity: full SVD with U/Vh, general (non-symmetric)
+eigen, richer fancy indexing, and broader dtype coverage beyond f32/f64 cast.
+After that, mirror the harness for SciPy, Pandas, Polars, and PyArrow.
