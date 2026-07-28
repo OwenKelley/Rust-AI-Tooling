@@ -4,6 +4,7 @@
 //! so Python/Rust parity tests can call the same conceptual surface.
 
 pub mod creation;
+pub mod gemm;
 pub mod linalg;
 pub mod ops;
 pub mod reductions;

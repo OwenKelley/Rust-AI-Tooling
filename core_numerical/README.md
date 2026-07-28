@@ -79,18 +79,18 @@ cargo bench -p rnumpy
 
 ## Speed notes
 
-`rnumpy` is tuned for local benches via:
+Performance work prefers **in-house `std` kernels** over extra crates:
 
-- release `lto = fat`, `codegen-units = 1`
-- `.cargo/config.toml` → `-C target-cpu=native`
-- `ndarray` features: `matrixmultiply-threading`, `rayon`
+- release `lto = fat`, `codegen-units = 1`, `target-cpu=native`
 - contiguous slice scans for `min`/`max`/`argmin`/`argmax`
-- `matmul`/`dot` on views (no extra matrix clones)
+- `crates/rnumpy/src/gemm.rs`: blocked + `std::thread` parallel GEMM / dot
+  (no rayon, no OpenBLAS/MKL)
 
-Still usually behind NumPy on `matmul` (MKL/OpenBLAS) and on `transpose`
-when NumPy returns a view (O(1)) while we materialize an owned array.
+`ndarray` remains only as the array **container** (still pulls `matrixmultiply`
+transitively, but `matmul`/`dot` do not call into it). Replacing that storage
+with a pure `Vec`+shape type is the next dependency-reduction step.
 
-Next lever if needed: link a system BLAS (`ndarray` + OpenBLAS/MKL) for GEMM.
+`transpose` still materializes an owned array; NumPy often returns an O(1) view.
 
 ## Next in Core Numerical
 
