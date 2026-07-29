@@ -2,9 +2,18 @@
 resolver = "2"
 members = [
     "crates/rnumpy",
+    "crates/rscipy",
+    "crates/rpandas",
+    "crates/rtorch",
     "crates/parity_runner",
 ]
-default-members = ["crates/rnumpy", "crates/parity_runner"]
+default-members = [
+    "crates/rnumpy",
+    "crates/rscipy",
+    "crates/rpandas",
+    "crates/rtorch",
+    "crates/parity_runner",
+]
 
 [workspace.package]
 edition = "2021"

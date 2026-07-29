@@ -1,0 +1,9 @@
+[package]
+name = "rtorch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PyTorch-like tensor + autograd API for Rust (1:1 mapping target)"
+
+[dependencies]
+# Local only — no third-party tensor/autograd crates.

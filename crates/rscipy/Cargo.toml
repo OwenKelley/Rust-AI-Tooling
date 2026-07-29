@@ -1,0 +1,9 @@
+[package]
+name = "rscipy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SciPy-like scientific API for Rust (1:1 mapping target)"
+
+[dependencies]
+rnumpy = { path = "../rnumpy" }

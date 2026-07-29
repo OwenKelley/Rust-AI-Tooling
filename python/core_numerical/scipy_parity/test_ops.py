@@ -1,0 +1,79 @@
+"""Unit tests for SciPy reference ops."""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from core_numerical.scipy_parity.ops import run_op
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        "erf",
+        "erfc",
+        "gamma",
+        "gammaln",
+        "expit",
+        "logit",
+        "logsumexp",
+        "softmax",
+        "i0",
+        "ndtr",
+        "ndtri",
+        "lu",
+        "lu_factor",
+        "cholesky",
+        "solve_triangular",
+        "lstsq",
+        "norm",
+        "norm_1",
+        "norm_inf",
+        "expm",
+        "nelder_mead",
+        "lbfgsb",
+        "least_squares",
+        "norm_pdf",
+        "norm_cdf",
+        "norm_ppf",
+        "entropy",
+        "zscore",
+        "rankdata",
+        "pearsonr",
+        "spearmanr",
+        "ttest_ind",
+        "skew",
+        "kurtosis",
+        "sem",
+        "csr_from_dense",
+        "csr_matvec",
+        "csr_matmat",
+        "csr_transpose",
+        "csr_add",
+        "csr_eye",
+        "csr_norm",
+        "csr_to_csc",
+        "fft",
+        "ifft",
+        "rfft",
+        "irfft",
+        "fftfreq",
+        "convolve",
+        "fftconvolve",
+        "correlate",
+        "hann",
+        "hamming",
+        "blackman",
+        "detrend",
+        "trapezoid",
+        "simpson",
+        "cumulative_trapezoid",
+        "quad",
+        "solve_ivp",
+    ],
+)
+def test_run_op_finite(op: str):
+    checksum = run_op(op, size=16, seed=42)
+    assert math.isfinite(checksum)

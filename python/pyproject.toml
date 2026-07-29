@@ -5,6 +5,9 @@ description = "Python reference side for Rust AI tooling parity tests"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.26",
+    "scipy>=1.11",
+    "pandas>=2.0",
+    "torch>=2.0",
     "pytest>=8.0",
 ]
 

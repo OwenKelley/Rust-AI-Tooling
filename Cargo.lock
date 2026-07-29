@@ -7,8 +7,29 @@ name = "parity_runner"
 version = "0.1.0"
 dependencies = [
  "rnumpy",
+ "rpandas",
+ "rscipy",
+ "rtorch",
 ]
 
 [[package]]
 name = "rnumpy"
+version = "0.1.0"
+
+[[package]]
+name = "rpandas"
+version = "0.1.0"
+dependencies = [
+ "rnumpy",
+]
+
+[[package]]
+name = "rscipy"
+version = "0.1.0"
+dependencies = [
+ "rnumpy",
+]
+
+[[package]]
+name = "rtorch"
 version = "0.1.0"

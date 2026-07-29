@@ -1,0 +1,9 @@
+[package]
+name = "rpandas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pandas-like tabular API for Rust (1:1 mapping target)"
+
+[dependencies]
+rnumpy = { path = "../rnumpy" }

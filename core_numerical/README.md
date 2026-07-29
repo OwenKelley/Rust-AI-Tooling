@@ -4,6 +4,10 @@ First slice of the 1:1 Python→Rust translation work. This directory pair maps
 common **NumPy** APIs onto the Rust crate `rnumpy`, then checks both **correctness**
 and **speed**.
 
+SciPy slice: see [`SCIPY.md`](SCIPY.md).
+Pandas slice: see [`PANDAS.md`](PANDAS.md).
+PyTorch slice: see [`TORCH.md`](TORCH.md).
+
 ## Layout
 
 | Path | Role |
