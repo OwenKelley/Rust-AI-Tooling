@@ -49,6 +49,10 @@ from core_numerical.torch_parity.ops import run_op
         "max_pool2d_forward",
         "flatten_forward",
         "multisteplr",
+        "batchnorm2d_forward",
+        "avg_pool2d_forward",
+        "cosineannealinglr",
+        "dataloader_epoch",
     ],
 )
 def test_op_finite_checksum(op: str) -> None:

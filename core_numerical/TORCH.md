@@ -23,16 +23,17 @@ with correctness and speed checks against PyTorch.
 | `reshape` / `t` | `rtorch::{reshape,transpose}` |
 | `torch.cat` / `stack` / `index_select` | `rtorch::{cat,stack,index_select}` |
 | `F.relu` / `sigmoid` / `tanh` / `gelu` (tanh approx) / `softmax` / `log_softmax` | `rtorch::{relu,sigmoid,tanh,gelu,softmax,log_softmax}` |
-| `F.dropout` / `F.max_pool2d` | `rtorch::{dropout,max_pool2d}` / `nn::{Dropout,MaxPool2d}` |
+| `F.dropout` / `F.max_pool2d` / `F.avg_pool2d` | `rtorch::{dropout,max_pool2d,avg_pool2d}` / `nn::{Dropout,MaxPool2d,AvgPool2d}` |
 | `nn.Linear` / `Sequential` / `Embedding` / `Flatten` | `rtorch::{Linear,Sequential,Embedding,Flatten}` |
-| `nn.LayerNorm` / `BatchNorm1d` / `Conv2d` (NCHW, s=1, p=0) | `rtorch::{LayerNorm,BatchNorm1d,Conv2d}` |
+| `nn.LayerNorm` / `BatchNorm1d` / `BatchNorm2d` / `Conv2d` | `rtorch::{LayerNorm,BatchNorm1d,BatchNorm2d,Conv2d}` |
 | `nn.MSELoss` / `CrossEntropyLoss` | `rtorch::{MSELoss,CrossEntropyLoss}` |
 | `loss.backward()` | `Tensor::backward` |
 | `optim.SGD` / `Adam` / `AdamW` | `rtorch::{SGD,Adam,AdamW}` |
-| `lr_scheduler.StepLR` / `MultiStepLR` | `rtorch::{StepLR,MultiStepLR}` |
+| `StepLR` / `MultiStepLR` / `CosineAnnealingLR` | `rtorch::{StepLR,MultiStepLR,CosineAnnealingLR}` |
+| `TensorDataset` / `DataLoader` | `rtorch::{TensorDataset,DataLoader}` |
 | `tensor.detach` / `torch.no_grad` | `Tensor::detach` / `rtorch::no_grad` |
 
-**CPU `f32` only.** Dynamic reverse-mode autograd. No CUDA, DataLoader, or `torch.compile`.
+**CPU `f32` only.** Dynamic reverse-mode autograd. No CUDA or `torch.compile`.
 
 ## Setup
 
@@ -59,9 +60,9 @@ python -m core_numerical.torch_parity.compare --size 64 --iters 20
 
 1. ~~**Tensor completeness**~~ — Phase 2 landed. Still open: dtypes, in-place ops, views/slicing sugar
 2. **Autograd depth** — `create_graph`, custom `Function`, gradcheck
-3. ~~**`nn` modules**~~ — Embedding, LayerNorm, Conv2d, BatchNorm1d, MaxPool2d, Flatten, GELU/Tanh landed. Still open: BatchNorm2d, RNN/Transformer blocks, …
-4. ~~**Optimizers**~~ — Adam / AdamW / StepLR / MultiStepLR landed. Still open: more schedulers, `state_dict`
-5. **Data** — Dataset / DataLoader; bridges from `rpandas` / `rnumpy`
+3. ~~**`nn` modules**~~ — Conv/Norm/Pool/Embedding/activations landed. Still open: RNN/Transformer blocks, …
+4. ~~**Optimizers**~~ — Adam / AdamW / StepLR / MultiStepLR / CosineAnnealingLR landed. Still open: `state_dict`
+5. ~~**Data (first slice)**~~ — `TensorDataset` / `DataLoader` landed. Still open: samplers, collate, `rpandas`/`rnumpy` bridges
 6. **Devices / perf** — device enum, optional GPU, fused kernels, AMP
 7. **Ecosystem** — reference models, ONNX path, HF/Lightning notes
 

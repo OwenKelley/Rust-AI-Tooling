@@ -12,7 +12,7 @@ mod norm;
 mod pool;
 
 pub use activation::{ReLU, Sigmoid, Softmax, GELU, Tanh};
-pub use batchnorm::BatchNorm1d;
+pub use batchnorm::{BatchNorm1d, BatchNorm2d};
 pub use container::{ModuleList, Sequential};
 pub use conv::Conv2d;
 pub use dropout::Dropout;
@@ -20,7 +20,7 @@ pub use embedding::Embedding;
 pub use linear::Linear;
 pub use loss::{CrossEntropyLoss, MSELoss};
 pub use norm::LayerNorm;
-pub use pool::{max_pool2d, Flatten, MaxPool2d};
+pub use pool::{avg_pool2d, max_pool2d, AvgPool2d, Flatten, MaxPool2d};
 
 use crate::tensor::Tensor;
 

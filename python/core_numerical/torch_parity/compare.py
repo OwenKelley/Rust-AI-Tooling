@@ -52,6 +52,10 @@ OPS = [
     "max_pool2d_forward",
     "flatten_forward",
     "multisteplr",
+    "batchnorm2d_forward",
+    "avg_pool2d_forward",
+    "cosineannealinglr",
+    "dataloader_epoch",
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -135,8 +139,10 @@ def tolerances(op: str) -> tuple[float, float]:
         "embedding_forward",
         "layernorm_forward",
         "batchnorm1d_forward",
+        "batchnorm2d_forward",
         "conv2d_forward",
         "max_pool2d_forward",
+        "avg_pool2d_forward",
         "mse_loss",
         "cross_entropy",
         "matmul",
@@ -144,6 +150,7 @@ def tolerances(op: str) -> tuple[float, float]:
         "softmax",
         "gelu",
         "tanh",
+        "dataloader_epoch",
     ):
         return 1e-4, 1e-5
     return 1e-5, 1e-6

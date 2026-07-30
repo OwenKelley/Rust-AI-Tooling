@@ -66,6 +66,56 @@ pub fn max_pool2d(input: &Tensor, kernel_size: usize, stride: usize) -> Tensor {
     })
 }
 
+/// `F.avg_pool2d` / `nn.AvgPool2d` — NCHW, padding=0, count_include_pad=True.
+pub fn avg_pool2d(input: &Tensor, kernel_size: usize, stride: usize) -> Tensor {
+    let xi = input.inner.borrow();
+    assert_eq!(xi.shape.len(), 4, "avg_pool2d: NCHW");
+    let (n, c, h, w) = (xi.shape[0], xi.shape[1], xi.shape[2], xi.shape[3]);
+    assert!(h >= kernel_size && w >= kernel_size);
+    let oh = (h - kernel_size) / stride + 1;
+    let ow = (w - kernel_size) / stride + 1;
+    let out_n = n * c * oh * ow;
+    let mut data = vec![0.0f32; out_n];
+    let inv = 1.0 / (kernel_size * kernel_size) as f32;
+    for ni in 0..n {
+        for ci in 0..c {
+            for oy in 0..oh {
+                for ox in 0..ow {
+                    let y0 = oy * stride;
+                    let x0 = ox * stride;
+                    let mut acc = 0.0f32;
+                    for ky in 0..kernel_size {
+                        for kx in 0..kernel_size {
+                            let ii = ((ni * c + ci) * h + (y0 + ky)) * w + (x0 + kx);
+                            acc += xi.data[ii];
+                        }
+                    }
+                    data[((ni * c + ci) * oh + oy) * ow + ox] = acc * inv;
+                }
+            }
+        }
+    }
+    let shape = vec![n, c, oh, ow];
+    drop(xi);
+    let rg = is_grad_enabled() && input.requires_grad();
+    let gf = if rg {
+        Some(GradFn::AvgPool2d {
+            input: input.clone(),
+            kernel_size,
+            stride,
+        })
+    } else {
+        None
+    };
+    Tensor::from_inner(TensorInner {
+        data,
+        shape,
+        requires_grad: rg,
+        grad: if rg { Some(vec![0.0; out_n]) } else { None },
+        grad_fn: gf,
+    })
+}
+
 pub struct MaxPool2d {
     pub kernel_size: usize,
     pub stride: usize,
@@ -83,6 +133,30 @@ impl MaxPool2d {
 impl Module for MaxPool2d {
     fn forward(&self, input: &Tensor) -> Tensor {
         max_pool2d(input, self.kernel_size, self.stride)
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        Vec::new()
+    }
+}
+
+pub struct AvgPool2d {
+    pub kernel_size: usize,
+    pub stride: usize,
+}
+
+impl AvgPool2d {
+    pub fn new(kernel_size: usize, stride: Option<usize>) -> Self {
+        Self {
+            kernel_size,
+            stride: stride.unwrap_or(kernel_size),
+        }
+    }
+}
+
+impl Module for AvgPool2d {
+    fn forward(&self, input: &Tensor) -> Tensor {
+        avg_pool2d(input, self.kernel_size, self.stride)
     }
 
     fn parameters(&self) -> Vec<Tensor> {

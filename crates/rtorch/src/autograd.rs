@@ -125,9 +125,21 @@ pub enum GradFn {
         mean: Vec<f32>,
         rstd: Vec<f32>,
     },
+    BatchNorm2d {
+        input: Tensor,
+        weight: Tensor,
+        bias: Tensor,
+        mean: Vec<f32>,
+        rstd: Vec<f32>,
+    },
     MaxPool2d {
         input: Tensor,
         indices: Vec<usize>,
+        kernel_size: usize,
+        stride: usize,
+    },
+    AvgPool2d {
+        input: Tensor,
         kernel_size: usize,
         stride: usize,
     },
@@ -167,7 +179,9 @@ impl std::fmt::Debug for GradFn {
             GradFn::Tanh { .. } => "Tanh",
             GradFn::Gelu { .. } => "Gelu",
             GradFn::BatchNorm1d { .. } => "BatchNorm1d",
+            GradFn::BatchNorm2d { .. } => "BatchNorm2d",
             GradFn::MaxPool2d { .. } => "MaxPool2d",
+            GradFn::AvgPool2d { .. } => "AvgPool2d",
         };
         write!(f, "GradFn::{name}")
     }
@@ -262,10 +276,19 @@ fn visit(
                     visit(b, visited, order);
                 }
             }
-            GradFn::Tanh { input, .. } | GradFn::Gelu { input } | GradFn::MaxPool2d { input, .. } => {
+            GradFn::Tanh { input, .. }
+            | GradFn::Gelu { input }
+            | GradFn::MaxPool2d { input, .. }
+            | GradFn::AvgPool2d { input, .. } => {
                 visit(input, visited, order);
             }
             GradFn::BatchNorm1d {
+                input,
+                weight,
+                bias,
+                ..
+            }
+            | GradFn::BatchNorm2d {
                 input,
                 weight,
                 bias,
@@ -790,6 +813,55 @@ pub fn apply_backward(gf: &GradFn, gy: &[f32]) {
             weight.inner.borrow_mut().accumulate_grad(&gw);
             bias.inner.borrow_mut().accumulate_grad(&gb);
         }
+        GradFn::BatchNorm2d {
+            input,
+            weight,
+            bias,
+            mean,
+            rstd,
+        } => {
+            let shape = input.shape();
+            let (n, c, h, w_s) = (shape[0], shape[1], shape[2], shape[3]);
+            let m = n * h * w_s;
+            let xi = input.inner.borrow();
+            let wt = weight.inner.borrow();
+            let mut gin = vec![0.0f32; n * c * h * w_s];
+            let mut gw = vec![0.0f32; c];
+            let mut gb = vec![0.0f32; c];
+            let inv_m = 1.0 / m as f32;
+            for j in 0..c {
+                let mut sum_dy = 0.0f32;
+                let mut sum_dy_xhat = 0.0f32;
+                for ni in 0..n {
+                    for y in 0..h {
+                        for x in 0..w_s {
+                            let ii = ((ni * c + j) * h + y) * w_s + x;
+                            let xhat = (xi.data[ii] - mean[j]) * rstd[j];
+                            let dy = gy[ii] * wt.data[j];
+                            gb[j] += gy[ii];
+                            gw[j] += gy[ii] * xhat;
+                            sum_dy += dy;
+                            sum_dy_xhat += dy * xhat;
+                        }
+                    }
+                }
+                for ni in 0..n {
+                    for y in 0..h {
+                        for x in 0..w_s {
+                            let ii = ((ni * c + j) * h + y) * w_s + x;
+                            let xhat = (xi.data[ii] - mean[j]) * rstd[j];
+                            let dy = gy[ii] * wt.data[j];
+                            gin[ii] =
+                                rstd[j] * inv_m * (m as f32 * dy - sum_dy - xhat * sum_dy_xhat);
+                        }
+                    }
+                }
+            }
+            drop((xi, wt));
+            input.inner.borrow_mut().accumulate_grad(&gin);
+            weight.inner.borrow_mut().accumulate_grad(&gw);
+            bias.inner.borrow_mut().accumulate_grad(&gb);
+        }
         GradFn::MaxPool2d {
             input,
             indices,
@@ -798,6 +870,38 @@ pub fn apply_backward(gf: &GradFn, gy: &[f32]) {
             let mut gin = vec![0.0f32; input.numel()];
             for (out_i, &in_i) in indices.iter().enumerate() {
                 gin[in_i] += gy[out_i];
+            }
+            input.inner.borrow_mut().accumulate_grad(&gin);
+        }
+        GradFn::AvgPool2d {
+            input,
+            kernel_size,
+            stride,
+        } => {
+            let shape = input.shape();
+            let (n, c, h, w) = (shape[0], shape[1], shape[2], shape[3]);
+            let k = *kernel_size;
+            let s = *stride;
+            let oh = (h - k) / s + 1;
+            let ow = (w - k) / s + 1;
+            let scale = 1.0 / (k * k) as f32;
+            let mut gin = vec![0.0f32; n * c * h * w];
+            for ni in 0..n {
+                for ci in 0..c {
+                    for oy in 0..oh {
+                        for ox in 0..ow {
+                            let g = gy[((ni * c + ci) * oh + oy) * ow + ox] * scale;
+                            let y0 = oy * s;
+                            let x0 = ox * s;
+                            for ky in 0..k {
+                                for kx in 0..k {
+                                    let ii = ((ni * c + ci) * h + (y0 + ky)) * w + (x0 + kx);
+                                    gin[ii] += g;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             input.inner.borrow_mut().accumulate_grad(&gin);
         }

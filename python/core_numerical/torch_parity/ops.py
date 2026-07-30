@@ -464,6 +464,51 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
 
         return result, thunk
 
+    if op == "batchnorm2d_forward":
+        batch = max(min(n, 4), 2)
+        spatial = max(min(n, 8), 4)
+        c = 3
+        x = seeded_uniform((batch, c, spatial, spatial), seed, -1.0, 1.0)
+        bn = nn.BatchNorm2d(c, eps=1e-5, momentum=0.1)
+        with torch.no_grad():
+            bn.weight.copy_(seeded_uniform((c,), seed + 1, 0.5, 1.5))
+            bn.bias.copy_(seeded_uniform((c,), seed + 2, -0.1, 0.1))
+        bn.train()
+        result = bn(x)
+
+        def thunk() -> torch.Tensor:
+            return bn(x)
+
+        return result, thunk
+
+    if op == "avg_pool2d_forward":
+        batch = max(min(n, 4), 2)
+        spatial = max(min(n, 8), 4)
+        x = seeded_uniform((batch, 2, spatial, spatial), seed, -1.0, 1.0)
+        result = F.avg_pool2d(x, kernel_size=2, stride=2)
+
+        def thunk() -> torch.Tensor:
+            return F.avg_pool2d(x, kernel_size=2, stride=2)
+
+        return result, thunk
+
+    if op == "cosineannealinglr":
+        result = cosine_once(7)
+
+        def thunk() -> float:
+            return cosine_once(7)
+
+        return result, thunk
+
+    if op == "dataloader_epoch":
+        samples = max(min(n, 32), 16)
+        result = dataloader_once(samples, seed)
+
+        def thunk() -> float:
+            return dataloader_once(samples, seed)
+
+        return result, thunk
+
     raise ValueError(f"unknown op: {op}")
 
 
@@ -531,6 +576,41 @@ def multisteplr_once(steps: int) -> float:
         opt.step()
         sched.step()
     return float(opt.param_groups[0]["lr"])
+
+
+def cosine_once(steps: int) -> float:
+    p = nn.Parameter(torch.zeros(1))
+    opt = torch.optim.SGD([p], lr=0.1)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=10, eta_min=0.0)
+    for _ in range(steps):
+        opt.step()
+        sched.step()
+    return float(opt.param_groups[0]["lr"])
+
+
+def _fisher_yates(n: int, seed: int) -> list[int]:
+    idx = list(range(n))
+    state = seed
+    for i in range(n - 1, 0, -1):
+        state = (state * 1664525 + 1013904223) & 0xFFFFFFFFFFFFFFFF
+        j = int((state >> 8) % (i + 1))
+        idx[i], idx[j] = idx[j], idx[i]
+    return idx
+
+
+def dataloader_once(n: int, seed: int) -> float:
+    features = seeded_uniform((n, 4), seed, -1.0, 1.0)
+    labels = seeded_uniform((n, 1), seed + 1, -1.0, 1.0)
+    order = _fisher_yates(n, seed + 9)
+    batch_size = 8
+    acc = 0.0
+    for start in range(0, n, batch_size):
+        batch_idx = order[start : start + batch_size]
+        index = torch.tensor(batch_idx, dtype=torch.long)
+        xb = features.index_select(0, index)
+        yb = labels.index_select(0, index)
+        acc += checksum(xb) + checksum(yb)
+    return acc
 
 
 def run_op(op: str, size: int, seed: int) -> float:

@@ -5,10 +5,11 @@ use std::process;
 use std::time::Instant;
 
 use rtorch::{
-    add, cat, clamp, cross_entropy, dropout, exp, gelu, index_select, log, matmul, max_pool2d, mean,
-    mul, pow, relu, reshape, seeded_uniform, sigmoid, softmax, stack, sum, tanh, transpose, zeros,
-    Adam, AdamW, BatchNorm1d, Conv2d, CrossEntropyLoss, Embedding, Flatten, LayerNorm, Linear,
-    Module, MultiStepLR, MSELoss, ReLU, SGD, Sequential, StepLR,
+    add, avg_pool2d, cat, clamp, cross_entropy, dropout, exp, gelu, index_select, log, matmul,
+    max_pool2d, mean, mul, pow, relu, reshape, seeded_uniform, sigmoid, softmax, stack, sum, tanh,
+    transpose, zeros, Adam, AdamW, BatchNorm1d, BatchNorm2d, Conv2d, CosineAnnealingLR,
+    CrossEntropyLoss, DataLoader, Embedding, Flatten, LayerNorm, Linear, Module, MultiStepLR,
+    MSELoss, ReLU, SGD, Sequential, StepLR, TensorDataset,
 };
 
 #[derive(Debug, Clone)]
@@ -50,6 +51,10 @@ enum Op {
     MaxPool2dForward,
     FlattenForward,
     MultiStepLr,
+    BatchNorm2dForward,
+    AvgPool2dForward,
+    CosineAnnealingLr,
+    DataLoaderEpoch,
 }
 
 impl Op {
@@ -92,6 +97,10 @@ impl Op {
             "max_pool2d_forward" => Self::MaxPool2dForward,
             "flatten_forward" => Self::FlattenForward,
             "multisteplr" => Self::MultiStepLr,
+            "batchnorm2d_forward" => Self::BatchNorm2dForward,
+            "avg_pool2d_forward" => Self::AvgPool2dForward,
+            "cosineannealinglr" => Self::CosineAnnealingLr,
+            "dataloader_epoch" => Self::DataLoaderEpoch,
             other => return Err(format!("unknown op '{other}'")),
         })
     }
@@ -135,6 +144,10 @@ impl Op {
             Self::MaxPool2dForward => "max_pool2d_forward",
             Self::FlattenForward => "flatten_forward",
             Self::MultiStepLr => "multisteplr",
+            Self::BatchNorm2dForward => "batchnorm2d_forward",
+            Self::AvgPool2dForward => "avg_pool2d_forward",
+            Self::CosineAnnealingLr => "cosineannealinglr",
+            Self::DataLoaderEpoch => "dataloader_epoch",
         }
     }
 }
@@ -339,6 +352,23 @@ fn multisteplr_once(steps: usize) -> f64 {
         sched.step();
     }
     lr as f64
+}
+
+fn cosine_once(steps: usize) -> f64 {
+    let mut lr = 0.1f32;
+    let mut sched = CosineAnnealingLR::new(&mut lr, 10, 0.0);
+    for _ in 0..steps {
+        sched.step();
+    }
+    lr as f64
+}
+
+fn dataloader_once(n: usize, seed: u64) -> f64 {
+    let features = seeded_uniform(&[n, 4], seed, -1.0, 1.0);
+    let labels = seeded_uniform(&[n, 1], seed + 1, -1.0, 1.0);
+    let ds = TensorDataset::new(features, labels);
+    let mut loader = DataLoader::new(&ds, 8, true, seed + 9);
+    loader.epoch_checksum()
 }
 
 fn make_emb_indices(n: usize, vocab: usize, seed: u64) -> Vec<usize> {
@@ -770,6 +800,53 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(multisteplr_once(6));
+                }),
+            )
+        }
+        Op::BatchNorm2dForward => {
+            let batch = n.min(4).max(2);
+            let spatial = n.min(8).max(4);
+            let c = 3usize;
+            let x = seeded_uniform(&[batch, c, spatial, spatial], seed, -1.0, 1.0);
+            let w = seeded_uniform(&[c], seed + 1, 0.5, 1.5);
+            let b = seeded_uniform(&[c], seed + 2, -0.1, 0.1);
+            let bn = BatchNorm2d::from_params(w, b, 1e-5, 0.1);
+            let checksum = bn.forward(&x).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(bn.forward(&x));
+                }),
+            )
+        }
+        Op::AvgPool2dForward => {
+            let batch = n.min(4).max(2);
+            let spatial = n.min(8).max(4);
+            let x = seeded_uniform(&[batch, 2, spatial, spatial], seed, -1.0, 1.0);
+            let checksum = avg_pool2d(&x, 2, 2).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(avg_pool2d(&x, 2, 2));
+                }),
+            )
+        }
+        Op::CosineAnnealingLr => {
+            let checksum = cosine_once(7);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(cosine_once(7));
+                }),
+            )
+        }
+        Op::DataLoaderEpoch => {
+            let samples = n.min(32).max(16);
+            let checksum = dataloader_once(samples, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(dataloader_once(samples, seed));
                 }),
             )
         }

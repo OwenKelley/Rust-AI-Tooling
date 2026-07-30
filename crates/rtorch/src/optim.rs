@@ -169,6 +169,7 @@ pub struct StepLR<'a> {
 impl<'a> StepLR<'a> {
     pub fn new(lr: &'a mut f32, step_size: usize, gamma: f32) -> Self {
         let initial_lr = *lr;
+        // Match PyTorch: `__init__` calls `step()` once → `last_epoch == 0`.
         Self {
             step_size,
             gamma,
@@ -178,11 +179,11 @@ impl<'a> StepLR<'a> {
         }
     }
 
-    /// Match PyTorch `StepLR`: after the Nth call, `lr = initial * gamma ** ((N-1) // step_size)`.
+    /// Match PyTorch after construction: Nth user `step` uses epoch `N`.
     pub fn step(&mut self) {
+        self.last_epoch += 1;
         let factor = self.gamma.powi((self.last_epoch / self.step_size) as i32);
         *self.lr = self.initial_lr * factor;
-        self.last_epoch += 1;
     }
 }
 
@@ -207,14 +208,48 @@ impl<'a> MultiStepLR<'a> {
         }
     }
 
-    /// Match PyTorch closed form: `lr = initial * gamma ** bisect_right(milestones, epoch)`.
+    /// Match PyTorch after construction: Nth user `step` uses epoch `N`.
     pub fn step(&mut self) {
+        self.last_epoch += 1;
         let n = self
             .milestones
             .iter()
             .filter(|&&m| m <= self.last_epoch)
             .count();
         *self.lr = self.initial_lr * self.gamma.powi(n as i32);
+    }
+}
+
+/// `torch.optim.lr_scheduler.CosineAnnealingLR`.
+pub struct CosineAnnealingLR<'a> {
+    pub t_max: usize,
+    pub eta_min: f32,
+    pub last_epoch: usize,
+    lr: &'a mut f32,
+    initial_lr: f32,
+}
+
+impl<'a> CosineAnnealingLR<'a> {
+    pub fn new(lr: &'a mut f32, t_max: usize, eta_min: f32) -> Self {
+        let initial_lr = *lr;
+        // Match PyTorch: `__init__` calls `step()` once → `last_epoch == 0`, lr unchanged.
+        Self {
+            t_max,
+            eta_min,
+            last_epoch: 0,
+            lr,
+            initial_lr,
+        }
+    }
+
+    /// Match PyTorch closed form after construction: Nth user `step` uses epoch `N`.
+    pub fn step(&mut self) {
         self.last_epoch += 1;
+        let t = self.last_epoch as f32;
+        let t_max = self.t_max.max(1) as f32;
+        *self.lr = self.eta_min
+            + (self.initial_lr - self.eta_min)
+                * (1.0 + (std::f32::consts::PI * t / t_max).cos())
+                * 0.5;
     }
 }
