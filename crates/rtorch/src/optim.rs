@@ -93,6 +93,77 @@ impl Adam {
             }
         }
     }
+
+    /// Snapshot of Adam hyperparams + moment buffers.
+    pub fn state_dict(&self) -> AdamStateDict {
+        AdamStateDict {
+            lr: self.lr,
+            beta1: self.beta1,
+            beta2: self.beta2,
+            eps: self.eps,
+            step: self.t,
+            exp_avg: self.m.clone(),
+            exp_avg_sq: self.v.clone(),
+            params: self
+                .params
+                .iter()
+                .map(|p| p.inner.borrow().data.clone())
+                .collect(),
+        }
+    }
+
+    pub fn load_state_dict(&mut self, sd: &AdamStateDict) {
+        assert_eq!(sd.exp_avg.len(), self.params.len());
+        assert_eq!(sd.exp_avg_sq.len(), self.params.len());
+        assert_eq!(sd.params.len(), self.params.len());
+        self.lr = sd.lr;
+        self.beta1 = sd.beta1;
+        self.beta2 = sd.beta2;
+        self.eps = sd.eps;
+        self.t = sd.step;
+        self.m = sd.exp_avg.clone();
+        self.v = sd.exp_avg_sq.clone();
+        for (p, data) in self.params.iter().zip(sd.params.iter()) {
+            assert_eq!(p.numel(), data.len());
+            p.inner.borrow_mut().data.copy_from_slice(data);
+        }
+    }
+}
+
+/// Serializable Adam optimizer state.
+#[derive(Clone, Debug)]
+pub struct AdamStateDict {
+    pub lr: f32,
+    pub beta1: f32,
+    pub beta2: f32,
+    pub eps: f32,
+    pub step: u64,
+    pub exp_avg: Vec<Vec<f32>>,
+    pub exp_avg_sq: Vec<Vec<f32>>,
+    pub params: Vec<Vec<f32>>,
+}
+
+impl AdamStateDict {
+    pub fn checksum(&self) -> f64 {
+        let mut acc = self.lr as f64
+            + self.beta1 as f64
+            + self.beta2 as f64
+            + self.eps as f64
+            + self.step as f64;
+        for buf in self
+            .exp_avg
+            .iter()
+            .chain(self.exp_avg_sq.iter())
+            .chain(self.params.iter())
+        {
+            for &v in buf {
+                if v.is_finite() {
+                    acc += v as f64;
+                }
+            }
+        }
+        acc
+    }
 }
 
 /// `torch.optim.AdamW` — Adam with decoupled weight decay.

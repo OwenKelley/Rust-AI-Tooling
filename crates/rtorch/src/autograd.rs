@@ -26,6 +26,10 @@ pub enum GradFn {
         input: Tensor,
         mask: Vec<bool>,
     },
+    LeakyRelu {
+        input: Tensor,
+        negative_slope: f32,
+    },
     Sigmoid {
         input: Tensor,
         fwd: Vec<f32>,
@@ -143,6 +147,26 @@ pub enum GradFn {
         kernel_size: usize,
         stride: usize,
     },
+    AdaptiveAvgPool2d {
+        input: Tensor,
+        out_h: usize,
+        out_w: usize,
+    },
+    Chunk {
+        input: Tensor,
+        dim: usize,
+        start: usize,
+        length: usize,
+    },
+    Bmm(Rc<(Tensor, Tensor)>),
+    Permute {
+        input: Tensor,
+        dims: Vec<usize>,
+    },
+    Silu {
+        input: Tensor,
+        fwd: Vec<f32>,
+    },
 }
 
 impl std::fmt::Debug for GradFn {
@@ -156,6 +180,7 @@ impl std::fmt::Debug for GradFn {
             GradFn::Sum { .. } => "Sum",
             GradFn::Mean { .. } => "Mean",
             GradFn::Relu { .. } => "Relu",
+            GradFn::LeakyRelu { .. } => "LeakyRelu",
             GradFn::Sigmoid { .. } => "Sigmoid",
             GradFn::Exp { .. } => "Exp",
             GradFn::Log { .. } => "Log",
@@ -182,6 +207,11 @@ impl std::fmt::Debug for GradFn {
             GradFn::BatchNorm2d { .. } => "BatchNorm2d",
             GradFn::MaxPool2d { .. } => "MaxPool2d",
             GradFn::AvgPool2d { .. } => "AvgPool2d",
+            GradFn::AdaptiveAvgPool2d { .. } => "AdaptiveAvgPool2d",
+            GradFn::Chunk { .. } => "Chunk",
+            GradFn::Bmm(_) => "Bmm",
+            GradFn::Permute { .. } => "Permute",
+            GradFn::Silu { .. } => "Silu",
         };
         write!(f, "GradFn::{name}")
     }
@@ -212,13 +242,15 @@ fn visit(
             | GradFn::Mul(ab)
             | GradFn::Div(ab)
             | GradFn::Matmul(ab)
-            | GradFn::Pow(ab) => {
+            | GradFn::Pow(ab)
+            | GradFn::Bmm(ab) => {
                 visit(&ab.0, visited, order);
                 visit(&ab.1, visited, order);
             }
             GradFn::Sum { input, .. }
             | GradFn::Mean { input, .. }
             | GradFn::Relu { input, .. }
+            | GradFn::LeakyRelu { input, .. }
             | GradFn::Reshape { input }
             | GradFn::Transpose2d { input }
             | GradFn::Sigmoid { input, .. }
@@ -279,7 +311,11 @@ fn visit(
             GradFn::Tanh { input, .. }
             | GradFn::Gelu { input }
             | GradFn::MaxPool2d { input, .. }
-            | GradFn::AvgPool2d { input, .. } => {
+            | GradFn::AvgPool2d { input, .. }
+            | GradFn::AdaptiveAvgPool2d { input, .. }
+            | GradFn::Chunk { input, .. }
+            | GradFn::Permute { input, .. }
+            | GradFn::Silu { input, .. } => {
                 visit(input, visited, order);
             }
             GradFn::BatchNorm1d {
@@ -421,6 +457,19 @@ pub fn apply_backward(gf: &GradFn, gy: &[f32]) {
                 .zip(mask.iter())
                 .map(|(g, &m)| if m { *g } else { 0.0 })
                 .collect();
+            input.inner.borrow_mut().accumulate_grad(&gin);
+        }
+        GradFn::LeakyRelu {
+            input,
+            negative_slope,
+        } => {
+            let xi = input.inner.borrow();
+            let gin: Vec<f32> = gy
+                .iter()
+                .zip(xi.data.iter())
+                .map(|(g, &v)| if v >= 0.0 { *g } else { *g * negative_slope })
+                .collect();
+            drop(xi);
             input.inner.borrow_mut().accumulate_grad(&gin);
         }
         GradFn::Sigmoid { input, fwd } => {
@@ -673,14 +722,14 @@ pub fn apply_backward(gf: &GradFn, gy: &[f32]) {
             ..
         } => {
             let shape = input.shape();
-            let n = shape[0];
-            let c = shape[1];
+            let c = *shape.last().unwrap();
+            let rows = input.numel() / c;
             let xi = input.inner.borrow();
             let w = weight.inner.borrow();
-            let mut gin = vec![0.0f32; n * c];
+            let mut gin = vec![0.0f32; rows * c];
             let mut gw = vec![0.0f32; c];
             let mut gb = vec![0.0f32; c];
-            for i in 0..n {
+            for i in 0..rows {
                 let m = mean[i];
                 let rs = rstd[i];
                 let mut dhat = vec![0.0f32; c];
@@ -690,7 +739,6 @@ pub fn apply_backward(gf: &GradFn, gy: &[f32]) {
                     gw[j] += gy[i * c + j] * xhat;
                     dhat[j] = gy[i * c + j] * w.data[j];
                 }
-                // dx = (1/c) * rstd * (c*dhat - sum(dhat) - xhat * sum(dhat * xhat))
                 let mut sum_dhat = 0.0f32;
                 let mut sum_dhat_xhat = 0.0f32;
                 for j in 0..c {
@@ -701,7 +749,8 @@ pub fn apply_backward(gf: &GradFn, gy: &[f32]) {
                 let inv_c = 1.0 / c as f32;
                 for j in 0..c {
                     let xhat = (xi.data[i * c + j] - m) * rs;
-                    gin[i * c + j] = rs * inv_c * (c as f32 * dhat[j] - sum_dhat - xhat * sum_dhat_xhat);
+                    gin[i * c + j] =
+                        rs * inv_c * (c as f32 * dhat[j] - sum_dhat - xhat * sum_dhat_xhat);
                 }
             }
             drop((xi, w));
@@ -905,7 +954,151 @@ pub fn apply_backward(gf: &GradFn, gy: &[f32]) {
             }
             input.inner.borrow_mut().accumulate_grad(&gin);
         }
+        GradFn::AdaptiveAvgPool2d {
+            input,
+            out_h,
+            out_w,
+        } => {
+            let shape = input.shape();
+            let (n, c, h, w) = (shape[0], shape[1], shape[2], shape[3]);
+            let oh = *out_h;
+            let ow = *out_w;
+            let mut gin = vec![0.0f32; n * c * h * w];
+            for ni in 0..n {
+                for ci in 0..c {
+                    for oy in 0..oh {
+                        for ox in 0..ow {
+                            let y0 = oy * h / oh;
+                            let y1 = ((oy + 1) * h + oh - 1) / oh;
+                            let x0 = ox * w / ow;
+                            let x1 = ((ox + 1) * w + ow - 1) / ow;
+                            let area = ((y1 - y0) * (x1 - x0)) as f32;
+                            let g = gy[((ni * c + ci) * oh + oy) * ow + ox] / area.max(1.0);
+                            for y in y0..y1 {
+                                for x in x0..x1 {
+                                    gin[((ni * c + ci) * h + y) * w + x] += g;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            input.inner.borrow_mut().accumulate_grad(&gin);
+        }
+        GradFn::Chunk {
+            input,
+            dim,
+            start,
+            length,
+        } => {
+            let shape = input.shape();
+            let mut gin = vec![0.0f32; input.numel()];
+            let outer: usize = shape[..*dim].iter().product();
+            let inner: usize = shape[*dim + 1..].iter().product();
+            let dim_size = shape[*dim];
+            for o in 0..outer {
+                for k in 0..*length {
+                    for j in 0..inner {
+                        let src = (o * length + k) * inner + j;
+                        let dst = (o * dim_size + start + k) * inner + j;
+                        gin[dst] += gy[src];
+                    }
+                }
+            }
+            input.inner.borrow_mut().accumulate_grad(&gin);
+        }
+        GradFn::Bmm(ab) => {
+            // a (B,M,K), b (B,K,N), gy (B,M,N)
+            let a_shape = ab.0.shape();
+            let b_shape = ab.1.shape();
+            let (batch, m, k) = (a_shape[0], a_shape[1], a_shape[2]);
+            let n = b_shape[2];
+            let a = ab.0.inner.borrow();
+            let b = ab.1.inner.borrow();
+            let mut ga = vec![0.0f32; batch * m * k];
+            let mut gb = vec![0.0f32; batch * k * n];
+            for bi in 0..batch {
+                let a_off = bi * m * k;
+                let b_off = bi * k * n;
+                let g_off = bi * m * n;
+                // ga = gy @ b^T
+                for i in 0..m {
+                    for kk in 0..k {
+                        let mut s = 0.0f32;
+                        for j in 0..n {
+                            s += gy[g_off + i * n + j] * b.data[b_off + kk * n + j];
+                        }
+                        ga[a_off + i * k + kk] = s;
+                    }
+                }
+                // gb = a^T @ gy
+                for kk in 0..k {
+                    for j in 0..n {
+                        let mut s = 0.0f32;
+                        for i in 0..m {
+                            s += a.data[a_off + i * k + kk] * gy[g_off + i * n + j];
+                        }
+                        gb[b_off + kk * n + j] = s;
+                    }
+                }
+            }
+            drop((a, b));
+            ab.0.inner.borrow_mut().accumulate_grad(&ga);
+            ab.1.inner.borrow_mut().accumulate_grad(&gb);
+        }
+        GradFn::Permute { input, dims } => {
+            let inv = invert_permute(dims);
+            let y_shape: Vec<usize> = dims.iter().map(|&d| input.shape()[d]).collect();
+            let gx = permute_data(gy, &y_shape, &inv);
+            input.inner.borrow_mut().accumulate_grad(&gx);
+        }
+        GradFn::Silu { input, .. } => {
+            let xi = input.inner.borrow();
+            let mut gin = vec![0.0f32; gy.len()];
+            for i in 0..gy.len() {
+                let x = xi.data[i];
+                let s = 1.0 / (1.0 + (-x).exp());
+                gin[i] = gy[i] * (s * (1.0 + x * (1.0 - s)));
+            }
+            drop(xi);
+            input.inner.borrow_mut().accumulate_grad(&gin);
+        }
     }
+}
+
+fn invert_permute(dims: &[usize]) -> Vec<usize> {
+    let mut inv = vec![0usize; dims.len()];
+    for (i, &d) in dims.iter().enumerate() {
+        inv[d] = i;
+    }
+    inv
+}
+
+pub(crate) fn permute_data(data: &[f32], shape: &[usize], dims: &[usize]) -> Vec<f32> {
+    let ndim = shape.len();
+    assert_eq!(dims.len(), ndim);
+    let out_shape: Vec<usize> = dims.iter().map(|&d| shape[d]).collect();
+    let numel: usize = out_shape.iter().product();
+    let mut out = vec![0.0f32; numel];
+    let mut stride = vec![1usize; ndim];
+    for i in (0..ndim.saturating_sub(1)).rev() {
+        stride[i] = stride[i + 1] * shape[i + 1];
+    }
+    let mut out_stride = vec![1usize; ndim];
+    for i in (0..ndim.saturating_sub(1)).rev() {
+        out_stride[i] = out_stride[i + 1] * out_shape[i + 1];
+    }
+    for out_idx in 0..numel {
+        let mut rem = out_idx;
+        let mut in_idx = 0usize;
+        for i in 0..ndim {
+            let coord = rem / out_stride[i];
+            rem %= out_stride[i];
+            in_idx += coord * stride[dims[i]];
+        }
+        out[out_idx] = data[in_idx];
+    }
+    out
 }
 
 impl Tensor {

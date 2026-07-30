@@ -46,6 +46,28 @@ pub fn relu(x: &Tensor) -> Tensor {
     wrap(data, &shape, rg, gf)
 }
 
+/// `F.leaky_relu(x, negative_slope)`
+pub fn leaky_relu(x: &Tensor, negative_slope: f32) -> Tensor {
+    let xi = x.inner.borrow();
+    let rg = is_grad_enabled() && x.requires_grad();
+    let data: Vec<f32> = xi
+        .data
+        .iter()
+        .map(|&v| if v >= 0.0 { v } else { v * negative_slope })
+        .collect();
+    let shape = xi.shape.clone();
+    drop(xi);
+    let gf = if rg {
+        Some(GradFn::LeakyRelu {
+            input: x.clone(),
+            negative_slope,
+        })
+    } else {
+        None
+    };
+    wrap(data, &shape, rg, gf)
+}
+
 fn relu_kernel(x: &[f32], out: &mut [f32], mask: Option<&mut [bool]>) {
     debug_assert_eq!(x.len(), out.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -434,40 +456,41 @@ pub fn dropout(x: &Tensor, p: f32, train: bool, seed: u64) -> Tensor {
     let rg = is_grad_enabled() && x.requires_grad();
     let mut data = vec![0.0f32; n];
     let mut state = seed;
-    // Single pass: apply mask into output; keep mask only if needed for backward.
-    let mut mask = if rg {
-        vec![0.0f32; n]
-    } else {
-        Vec::new()
-    };
     let xd = xi.data.as_slice();
+    // Fast path: no grad → write output only.
+    if !rg {
+        for i in 0..n {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let u = ((state >> 8) & 0xFF_FFFF) as f32 * (1.0 / ((1u64 << 24) as f32));
+            data[i] = if u >= p { xd[i] * scale } else { 0.0 };
+        }
+        let shape = xi.shape.clone();
+        drop(xi);
+        return wrap(data, &shape, false, None);
+    }
+    let mut mask = vec![0.0f32; n];
     for i in 0..n {
         state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-        let u = ((state >> 8) & 0xFF_FFFF) as f32 / ((1u64 << 24) as f32);
+        let u = ((state >> 8) & 0xFF_FFFF) as f32 * (1.0 / ((1u64 << 24) as f32));
         let m = if u >= p { scale } else { 0.0 };
         data[i] = xd[i] * m;
-        if rg {
-            mask[i] = m;
-        }
+        mask[i] = m;
     }
     let shape = xi.shape.clone();
     drop(xi);
-    let gf = if rg {
-        Some(GradFn::Dropout {
-            input: x.clone(),
-            mask,
-        })
-    } else {
-        None
-    };
-    wrap(data, &shape, rg, gf)
+    let gf = Some(GradFn::Dropout {
+        input: x.clone(),
+        mask,
+    });
+    wrap(data, &shape, true, gf)
 }
 
 /// `F.tanh`
 pub fn tanh(x: &Tensor) -> Tensor {
     let xi = x.inner.borrow();
     let rg = is_grad_enabled() && x.requires_grad();
-    let data: Vec<f32> = xi.data.iter().map(|&v| v.tanh()).collect();
+    let mut data = vec![0.0f32; xi.data.len()];
+    tanh_kernel(xi.data.as_slice(), data.as_mut_slice());
     let fwd = if rg { data.clone() } else { Vec::new() };
     let shape = xi.shape.clone();
     drop(xi);
@@ -482,20 +505,32 @@ pub fn tanh(x: &Tensor) -> Tensor {
     wrap(data, &shape, rg, gf)
 }
 
+/// `tanh(x) = 2*sigmoid(2x) - 1` via the fast sigmoid kernel (chunked).
+fn tanh_kernel(x: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(x.len(), out.len());
+    const CHUNK: usize = 512;
+    let mut scaled = [0.0f32; CHUNK];
+    let mut sig = [0.0f32; CHUNK];
+    let mut off = 0;
+    while off < x.len() {
+        let n = (x.len() - off).min(CHUNK);
+        for i in 0..n {
+            scaled[i] = 2.0 * x[off + i];
+        }
+        sigmoid_kernel(&scaled[..n], &mut sig[..n]);
+        for i in 0..n {
+            out[off + i] = 2.0 * sig[i] - 1.0;
+        }
+        off += n;
+    }
+}
+
 /// `F.gelu(x, approximate='tanh')`
 pub fn gelu(x: &Tensor) -> Tensor {
     let xi = x.inner.borrow();
     let rg = is_grad_enabled() && x.requires_grad();
-    let k = (2.0 / std::f32::consts::PI).sqrt();
-    let c = 0.044_715f32;
-    let data: Vec<f32> = xi
-        .data
-        .iter()
-        .map(|&v| {
-            let u = k * (v + c * v * v * v);
-            0.5 * v * (1.0 + u.tanh())
-        })
-        .collect();
+    let mut data = vec![0.0f32; xi.data.len()];
+    gelu_kernel(xi.data.as_slice(), data.as_mut_slice());
     let shape = xi.shape.clone();
     drop(xi);
     let gf = if rg {
@@ -504,4 +539,134 @@ pub fn gelu(x: &Tensor) -> Tensor {
         None
     };
     wrap(data, &shape, rg, gf)
+}
+
+fn gelu_kernel(x: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(x.len(), out.len());
+    const CHUNK: usize = 512;
+    let k = (2.0 / std::f32::consts::PI).sqrt();
+    let c = 0.044_715f32;
+    let mut u = [0.0f32; CHUNK];
+    let mut th = [0.0f32; CHUNK];
+    let mut off = 0;
+    while off < x.len() {
+        let n = (x.len() - off).min(CHUNK);
+        for i in 0..n {
+            let v = x[off + i];
+            u[i] = k * (v + c * v * v * v);
+        }
+        tanh_kernel(&u[..n], &mut th[..n]);
+        for i in 0..n {
+            out[off + i] = 0.5 * x[off + i] * (1.0 + th[i]);
+        }
+        off += n;
+    }
+}
+
+/// `F.silu` / Swish: `x * sigmoid(x)`.
+pub fn silu(x: &Tensor) -> Tensor {
+    let xi = x.inner.borrow();
+    let rg = is_grad_enabled() && x.requires_grad();
+    let mut data = vec![0.0f32; xi.data.len()];
+    silu_kernel(xi.data.as_slice(), data.as_mut_slice());
+    let fwd = if rg { data.clone() } else { Vec::new() };
+    let shape = xi.shape.clone();
+    drop(xi);
+    let gf = if rg {
+        Some(GradFn::Silu {
+            input: x.clone(),
+            fwd,
+        })
+    } else {
+        None
+    };
+    wrap(data, &shape, rg, gf)
+}
+
+fn silu_kernel(x: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(x.len(), out.len());
+    sigmoid_kernel(x, out);
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                mul_assign_avx2(out, x);
+            }
+            return;
+        }
+    }
+    for i in 0..x.len() {
+        out[i] *= x[i];
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn mul_assign_avx2(a: &mut [f32], b: &[f32]) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let n = a.len();
+    let mut i = 0;
+    while i + 8 <= n {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+        _mm256_storeu_ps(a.as_mut_ptr().add(i), _mm256_mul_ps(va, vb));
+        i += 8;
+    }
+    while i < n {
+        a[i] *= b[i];
+        i += 1;
+    }
+}
+
+/// `F.scaled_dot_product_attention(q,k,v)` without mask/dropout.
+/// Shapes: `(B, L, D)`, `(B, S, D)`, `(B, S, D)` → `(B, L, D)`.
+pub fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Tensor {
+    scaled_dot_product_attention_masked(q, k, v, None)
+}
+
+/// `F.scaled_dot_product_attention(q,k,v,attn_mask=...)` — float additive mask.
+///
+/// `attn_mask` is optional and broadcastable to `(B, L, S)` (e.g. `(L, S)` causal).
+pub fn scaled_dot_product_attention_masked(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attn_mask: Option<&Tensor>,
+) -> Tensor {
+    use crate::ops::{add, bmm, div, full, permute, reshape};
+    assert_eq!(q.ndim(), 3);
+    assert_eq!(k.ndim(), 3);
+    assert_eq!(v.ndim(), 3);
+    let (b, l, d) = (q.shape()[0], q.shape()[1], q.shape()[2]);
+    let s = k.shape()[1];
+    assert_eq!(k.shape()[0], b);
+    assert_eq!(k.shape()[2], d);
+    assert_eq!(v.shape(), vec![b, s, d]);
+    let scale = (d as f32).sqrt();
+    let kt = permute(k, &[0, 2, 1]); // (B, D, S)
+    let scores = bmm(q, &kt); // (B, L, S)
+    let scores = div(&scores, &full(&[1], scale, false));
+    let scores = match attn_mask {
+        Some(m) => {
+            assert!(
+                m.ndim() == 2 || m.ndim() == 3,
+                "attn_mask: 2D (L,S) or 3D (B,L,S)"
+            );
+            if m.ndim() == 2 {
+                assert_eq!(m.shape(), vec![l, s], "attn_mask 2D shape");
+            } else {
+                assert_eq!(m.shape(), vec![b, l, s], "attn_mask 3D shape");
+            }
+            add(&scores, m)
+        }
+        None => scores,
+    };
+    let flat = reshape(&scores, &[b * l, s]);
+    let attn = softmax(&flat);
+    let attn = reshape(&attn, &[b, l, s]);
+    bmm(&attn, v)
 }

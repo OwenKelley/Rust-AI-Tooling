@@ -116,6 +116,56 @@ pub fn avg_pool2d(input: &Tensor, kernel_size: usize, stride: usize) -> Tensor {
     })
 }
 
+/// `F.adaptive_avg_pool2d(input, output_size)` — NCHW.
+pub fn adaptive_avg_pool2d(input: &Tensor, out_h: usize, out_w: usize) -> Tensor {
+    assert!(out_h > 0 && out_w > 0);
+    let xi = input.inner.borrow();
+    assert_eq!(xi.shape.len(), 4, "adaptive_avg_pool2d: NCHW");
+    let (n, c, h, w) = (xi.shape[0], xi.shape[1], xi.shape[2], xi.shape[3]);
+    let out_n = n * c * out_h * out_w;
+    let mut data = vec![0.0f32; out_n];
+    for ni in 0..n {
+        for ci in 0..c {
+            for oy in 0..out_h {
+                for ox in 0..out_w {
+                    let y0 = oy * h / out_h;
+                    let y1 = ((oy + 1) * h + out_h - 1) / out_h;
+                    let x0 = ox * w / out_w;
+                    let x1 = ((ox + 1) * w + out_w - 1) / out_w;
+                    let mut acc = 0.0f32;
+                    let mut cnt = 0usize;
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            acc += xi.data[((ni * c + ci) * h + y) * w + x];
+                            cnt += 1;
+                        }
+                    }
+                    data[((ni * c + ci) * out_h + oy) * out_w + ox] = acc / cnt.max(1) as f32;
+                }
+            }
+        }
+    }
+    let shape = vec![n, c, out_h, out_w];
+    drop(xi);
+    let rg = is_grad_enabled() && input.requires_grad();
+    let gf = if rg {
+        Some(GradFn::AdaptiveAvgPool2d {
+            input: input.clone(),
+            out_h,
+            out_w,
+        })
+    } else {
+        None
+    };
+    Tensor::from_inner(TensorInner {
+        data,
+        shape,
+        requires_grad: rg,
+        grad: if rg { Some(vec![0.0; out_n]) } else { None },
+        grad_fn: gf,
+    })
+}
+
 pub struct MaxPool2d {
     pub kernel_size: usize,
     pub stride: usize,
@@ -157,6 +207,28 @@ impl AvgPool2d {
 impl Module for AvgPool2d {
     fn forward(&self, input: &Tensor) -> Tensor {
         avg_pool2d(input, self.kernel_size, self.stride)
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        Vec::new()
+    }
+}
+
+/// `nn.AdaptiveAvgPool2d(output_size)`.
+pub struct AdaptiveAvgPool2d {
+    pub out_h: usize,
+    pub out_w: usize,
+}
+
+impl AdaptiveAvgPool2d {
+    pub fn new(out_h: usize, out_w: usize) -> Self {
+        Self { out_h, out_w }
+    }
+}
+
+impl Module for AdaptiveAvgPool2d {
+    fn forward(&self, input: &Tensor) -> Tensor {
+        adaptive_avg_pool2d(input, self.out_h, self.out_w)
     }
 
     fn parameters(&self) -> Vec<Tensor> {

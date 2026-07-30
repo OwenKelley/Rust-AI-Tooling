@@ -16,6 +16,34 @@ impl Module for ReLU {
     }
 }
 
+pub struct LeakyReLU {
+    pub negative_slope: f32,
+}
+
+impl LeakyReLU {
+    pub fn new(negative_slope: f32) -> Self {
+        Self { negative_slope }
+    }
+}
+
+impl Default for LeakyReLU {
+    fn default() -> Self {
+        Self {
+            negative_slope: 0.01,
+        }
+    }
+}
+
+impl Module for LeakyReLU {
+    fn forward(&self, input: &Tensor) -> Tensor {
+        functional::leaky_relu(input, self.negative_slope)
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        Vec::new()
+    }
+}
+
 pub struct Sigmoid;
 
 impl Module for Sigmoid {
@@ -59,6 +87,18 @@ pub struct GELU;
 impl Module for GELU {
     fn forward(&self, input: &Tensor) -> Tensor {
         functional::gelu(input)
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        Vec::new()
+    }
+}
+
+pub struct SiLU;
+
+impl Module for SiLU {
+    fn forward(&self, input: &Tensor) -> Tensor {
+        functional::silu(input)
     }
 
     fn parameters(&self) -> Vec<Tensor> {

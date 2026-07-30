@@ -509,7 +509,357 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
 
         return result, thunk
 
+    if op == "leaky_relu":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        result = F.leaky_relu(a, negative_slope=0.01)
+
+        def thunk() -> torch.Tensor:
+            return F.leaky_relu(a, negative_slope=0.01)
+
+        return result, thunk
+
+    if op == "gru_forward":
+        batch = max(min(n, 4), 2)
+        seq = max(min(n, 6), 3)
+        input_size, hidden = 4, 5
+        x = seeded_uniform((batch, seq, input_size), seed, -1.0, 1.0)
+        gru = nn.GRU(input_size, hidden, batch_first=True)
+        with torch.no_grad():
+            gru.weight_ih_l0.copy_(
+                seeded_uniform((3 * hidden, input_size), seed + 1, -0.2, 0.2)
+            )
+            gru.weight_hh_l0.copy_(seeded_uniform((3 * hidden, hidden), seed + 2, -0.2, 0.2))
+            gru.bias_ih_l0.copy_(seeded_uniform((3 * hidden,), seed + 3, -0.1, 0.1))
+            gru.bias_hh_l0.copy_(seeded_uniform((3 * hidden,), seed + 4, -0.1, 0.1))
+        out, _hn = gru(x)
+        result = out
+
+        def thunk() -> torch.Tensor:
+            return gru(x)[0]
+
+        return result, thunk
+
+    if op == "state_dict_roundtrip":
+        w = seeded_uniform((4, 3), seed, -0.5, 0.5)
+        b = seeded_uniform((4,), seed + 1, -0.1, 0.1)
+        layer = nn.Linear(3, 4, bias=True)
+        with torch.no_grad():
+            layer.weight.copy_(w)
+            layer.bias.copy_(b)
+        sd = {k: v.detach().clone() for k, v in layer.state_dict().items()}
+        layer2 = nn.Linear(3, 4, bias=True)
+        layer2.load_state_dict(sd)
+        x = seeded_uniform((8, 3), seed + 2, -1.0, 1.0)
+        sd_sum = float(
+            sum(float(v.detach().float().sum()) for v in sd.values())
+        )
+        result = float(layer2(x).sum()) + sd_sum
+
+        def thunk() -> float:
+            sd2 = layer2.state_dict()
+            return float(sum(float(v.detach().float().sum()) for v in sd2.values()))
+
+        return result, thunk
+
+    if op == "lstm_forward":
+        batch = max(min(n, 4), 2)
+        seq = max(min(n, 6), 3)
+        input_size, hidden = 4, 5
+        x = seeded_uniform((batch, seq, input_size), seed, -1.0, 1.0)
+        lstm = nn.LSTM(input_size, hidden, batch_first=True)
+        with torch.no_grad():
+            lstm.weight_ih_l0.copy_(
+                seeded_uniform((4 * hidden, input_size), seed + 1, -0.2, 0.2)
+            )
+            lstm.weight_hh_l0.copy_(seeded_uniform((4 * hidden, hidden), seed + 2, -0.2, 0.2))
+            lstm.bias_ih_l0.copy_(seeded_uniform((4 * hidden,), seed + 3, -0.1, 0.1))
+            lstm.bias_hh_l0.copy_(seeded_uniform((4 * hidden,), seed + 4, -0.1, 0.1))
+        out, _ = lstm(x)
+        result = out
+
+        def thunk() -> torch.Tensor:
+            return lstm(x)[0]
+
+        return result, thunk
+
+    if op == "adaptive_avg_pool2d_forward":
+        batch = max(min(n, 4), 2)
+        spatial = max(min(n, 8), 4)
+        x = seeded_uniform((batch, 3, spatial, spatial), seed, -1.0, 1.0)
+        result = F.adaptive_avg_pool2d(x, (2, 2))
+
+        def thunk() -> torch.Tensor:
+            return F.adaptive_avg_pool2d(x, (2, 2))
+
+        return result, thunk
+
+    if op == "adam_state_dict":
+        result = adam_state_dict_once(seed)
+
+        def thunk() -> float:
+            return adam_state_dict_once(seed)
+
+        return result, thunk
+
+    if op == "silu":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        result = F.silu(a)
+
+        def thunk() -> torch.Tensor:
+            return F.silu(a)
+
+        return result, thunk
+
+    if op == "mha_forward":
+        batch = max(min(n, 2), 1)
+        seq = max(min(n, 4), 2)
+        embed, heads = 8, 2
+        x = seeded_uniform((batch, seq, embed), seed, -1.0, 1.0)
+        mha = nn.MultiheadAttention(embed, heads, batch_first=True)
+        with torch.no_grad():
+            mha.in_proj_weight.copy_(
+                seeded_uniform((3 * embed, embed), seed + 1, -0.2, 0.2)
+            )
+            mha.in_proj_bias.copy_(seeded_uniform((3 * embed,), seed + 2, -0.1, 0.1))
+            mha.out_proj.weight.copy_(seeded_uniform((embed, embed), seed + 3, -0.2, 0.2))
+            mha.out_proj.bias.copy_(seeded_uniform((embed,), seed + 4, -0.1, 0.1))
+        out, _ = mha(x, x, x, need_weights=False)
+        result = out
+
+        def thunk() -> torch.Tensor:
+            return mha(x, x, x, need_weights=False)[0]
+
+        return result, thunk
+
+    if op == "transformer_encoder_layer_forward":
+        batch = max(min(n, 2), 1)
+        seq = max(min(n, 4), 2)
+        d_model, nhead, dim_ff = 8, 2, 16
+        x = seeded_uniform((batch, seq, d_model), seed, -1.0, 1.0)
+        layer = make_transformer_layer(d_model, nhead, dim_ff, seed)
+        result = layer(x)
+
+        def thunk() -> torch.Tensor:
+            return layer(x)
+
+        return result, thunk
+
+    if op == "transformer_encoder_forward":
+        batch = max(min(n, 2), 1)
+        seq = max(min(n, 4), 2)
+        d_model, nhead, dim_ff = 8, 2, 16
+        x = seeded_uniform((batch, seq, d_model), seed, -1.0, 1.0)
+        layers = [
+            make_transformer_layer(d_model, nhead, dim_ff, seed),
+            make_transformer_layer(d_model, nhead, dim_ff, seed + 100),
+        ]
+        enc = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model,
+                nhead,
+                dim_feedforward=dim_ff,
+                dropout=0.0,
+                batch_first=True,
+                activation="relu",
+            ),
+            num_layers=2,
+        )
+        with torch.no_grad():
+            for i, layer in enumerate(layers):
+                enc.layers[i].load_state_dict(layer.state_dict())
+        result = enc(x)
+
+        def thunk() -> torch.Tensor:
+            return enc(x)
+
+        return result, thunk
+
+    if op == "sdpa_causal":
+        batch = max(min(n, 2), 1)
+        seq = max(min(n, 4), 2)
+        d = 8
+        q = seeded_uniform((batch, seq, d), seed, -1.0, 1.0)
+        k = seeded_uniform((batch, seq, d), seed + 1, -1.0, 1.0)
+        v = seeded_uniform((batch, seq, d), seed + 2, -1.0, 1.0)
+        mask = causal_mask(seq)
+        result = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+
+        def thunk() -> torch.Tensor:
+            return F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+
+        return result, thunk
+
+    if op == "transformer_decoder_layer_forward":
+        batch = max(min(n, 2), 1)
+        tgt_len = max(min(n, 3), 2)
+        mem_len = max(min(n, 4), 2)
+        d_model, nhead, dim_ff = 8, 2, 16
+        tgt = seeded_uniform((batch, tgt_len, d_model), seed, -1.0, 1.0)
+        mem = seeded_uniform((batch, mem_len, d_model), seed + 1, -1.0, 1.0)
+        mask = causal_mask(tgt_len)
+        layer = make_decoder_layer(d_model, nhead, dim_ff, seed)
+        result = layer(tgt, mem, tgt_mask=mask)
+
+        def thunk() -> torch.Tensor:
+            return layer(tgt, mem, tgt_mask=mask)
+
+        return result, thunk
+
+    if op == "add_":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0).clone()
+        b = seeded_uniform((n, n), seed + 1, -1.0, 1.0)
+        a_work = a.clone()
+        a_work.add_(b)
+        result = a_work
+
+        def thunk() -> torch.Tensor:
+            t = a.clone()
+            t.add_(b)
+            return t
+
+        return result, thunk
+
+    if op == "relu_":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        a_work = a.clone()
+        a_work.relu_()
+        result = a_work
+
+        def thunk() -> torch.Tensor:
+            t = a.clone()
+            t.relu_()
+            return t
+
+        return result, thunk
+
+    if op == "narrow":
+        rows = max(min(n, 16), 4)
+        cols = max(min(n, 12), 4)
+        a = seeded_uniform((rows, cols), seed, -1.0, 1.0)
+        start = 1
+        length = max(cols // 2, 1)
+        result = torch.narrow(a, 1, start, length)
+
+        def thunk() -> torch.Tensor:
+            return torch.narrow(a, 1, start, length)
+
+        return result, thunk
+
     raise ValueError(f"unknown op: {op}")
+
+
+def causal_mask(sz: int) -> torch.Tensor:
+    m = torch.zeros(sz, sz, dtype=torch.float32)
+    idx = torch.triu(torch.ones(sz, sz, dtype=torch.bool), diagonal=1)
+    m = m.masked_fill(idx, -1e9)
+    return m
+
+
+def copy_mha_weights(mha: nn.MultiheadAttention, d_model: int, seed: int) -> None:
+    with torch.no_grad():
+        mha.in_proj_weight.copy_(
+            seeded_uniform((3 * d_model, d_model), seed + 1, -0.2, 0.2)
+        )
+        mha.in_proj_bias.copy_(seeded_uniform((3 * d_model,), seed + 2, -0.1, 0.1))
+        mha.out_proj.weight.copy_(
+            seeded_uniform((d_model, d_model), seed + 3, -0.2, 0.2)
+        )
+        mha.out_proj.bias.copy_(seeded_uniform((d_model,), seed + 4, -0.1, 0.1))
+
+
+def make_decoder_layer(
+    d_model: int, nhead: int, dim_ff: int, seed: int
+) -> nn.TransformerDecoderLayer:
+    layer = nn.TransformerDecoderLayer(
+        d_model,
+        nhead,
+        dim_feedforward=dim_ff,
+        dropout=0.0,
+        batch_first=True,
+        activation="relu",
+    )
+    copy_mha_weights(layer.self_attn, d_model, seed)
+    copy_mha_weights(layer.multihead_attn, d_model, seed + 100)
+    with torch.no_grad():
+        layer.linear1.weight.copy_(seeded_uniform((dim_ff, d_model), seed + 5, -0.2, 0.2))
+        layer.linear1.bias.copy_(seeded_uniform((dim_ff,), seed + 6, -0.1, 0.1))
+        layer.linear2.weight.copy_(seeded_uniform((d_model, dim_ff), seed + 7, -0.2, 0.2))
+        layer.linear2.bias.copy_(seeded_uniform((d_model,), seed + 8, -0.1, 0.1))
+        layer.norm1.weight.copy_(seeded_uniform((d_model,), seed + 9, 0.5, 1.5))
+        layer.norm1.bias.copy_(seeded_uniform((d_model,), seed + 10, -0.1, 0.1))
+        layer.norm2.weight.copy_(seeded_uniform((d_model,), seed + 11, 0.5, 1.5))
+        layer.norm2.bias.copy_(seeded_uniform((d_model,), seed + 12, -0.1, 0.1))
+        layer.norm3.weight.copy_(seeded_uniform((d_model,), seed + 13, 0.5, 1.5))
+        layer.norm3.bias.copy_(seeded_uniform((d_model,), seed + 14, -0.1, 0.1))
+    return layer
+
+
+def make_transformer_layer(
+    d_model: int, nhead: int, dim_ff: int, seed: int
+) -> nn.TransformerEncoderLayer:
+    layer = nn.TransformerEncoderLayer(
+        d_model,
+        nhead,
+        dim_feedforward=dim_ff,
+        dropout=0.0,
+        batch_first=True,
+        activation="relu",
+    )
+    with torch.no_grad():
+        layer.self_attn.in_proj_weight.copy_(
+            seeded_uniform((3 * d_model, d_model), seed + 1, -0.2, 0.2)
+        )
+        layer.self_attn.in_proj_bias.copy_(
+            seeded_uniform((3 * d_model,), seed + 2, -0.1, 0.1)
+        )
+        layer.self_attn.out_proj.weight.copy_(
+            seeded_uniform((d_model, d_model), seed + 3, -0.2, 0.2)
+        )
+        layer.self_attn.out_proj.bias.copy_(
+            seeded_uniform((d_model,), seed + 4, -0.1, 0.1)
+        )
+        layer.linear1.weight.copy_(seeded_uniform((dim_ff, d_model), seed + 5, -0.2, 0.2))
+        layer.linear1.bias.copy_(seeded_uniform((dim_ff,), seed + 6, -0.1, 0.1))
+        layer.linear2.weight.copy_(seeded_uniform((d_model, dim_ff), seed + 7, -0.2, 0.2))
+        layer.linear2.bias.copy_(seeded_uniform((d_model,), seed + 8, -0.1, 0.1))
+        layer.norm1.weight.copy_(seeded_uniform((d_model,), seed + 9, 0.5, 1.5))
+        layer.norm1.bias.copy_(seeded_uniform((d_model,), seed + 10, -0.1, 0.1))
+        layer.norm2.weight.copy_(seeded_uniform((d_model,), seed + 11, 0.5, 1.5))
+        layer.norm2.bias.copy_(seeded_uniform((d_model,), seed + 12, -0.1, 0.1))
+    return layer
+
+
+def adam_state_dict_once(seed: int) -> float:
+    x = seeded_uniform((8, 4), seed, -1.0, 1.0)
+    state = seed + 1
+    target_list = []
+    for _ in range(8):
+        state = (state * 1664525 + 1013904223) & 0xFFFFFFFFFFFFFFFF
+        target_list.append(int((state >> 8) % 3))
+    target = torch.tensor(target_list, dtype=torch.long)
+    l1 = make_linear(4, 8, seed + 10)
+    l2 = make_linear(8, 3, seed + 20)
+    params = list(l1.parameters()) + list(l2.parameters())
+    opt = torch.optim.Adam(params, lr=0.05)
+    for _ in range(3):
+        opt.zero_grad()
+        loss = F.cross_entropy(l2(F.relu(l1(x))), target)
+        loss.backward()
+        opt.step()
+    sd = opt.state_dict()
+    opt2 = torch.optim.Adam(params, lr=0.01)
+    opt2.load_state_dict(sd)
+    sd2 = opt2.state_dict()
+    pg = sd2["param_groups"][0]
+    acc = float(pg["lr"]) + float(pg["betas"][0]) + float(pg["betas"][1]) + float(pg["eps"])
+    states = [sd2["state"][k] for k in sorted(sd2["state"].keys())]
+    acc += float(states[0]["step"])
+    for i, p in enumerate(params):
+        st = states[i]
+        acc += float(st["exp_avg"].detach().float().sum())
+        acc += float(st["exp_avg_sq"].detach().float().sum())
+        acc += float(p.detach().float().sum())
+    return acc
 
 
 def adam_train_once(n: int, seed: int, steps: int) -> float:

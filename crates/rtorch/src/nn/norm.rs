@@ -6,7 +6,7 @@ use crate::nn::Module;
 use crate::ops::{ones, zeros};
 use crate::tensor::{Tensor, TensorInner};
 
-/// `torch.nn.LayerNorm(normalized_shape)` — last-dim normalize for 2D `(N, C)`.
+/// `torch.nn.LayerNorm(normalized_shape)` — normalize over the last dimension.
 pub struct LayerNorm {
     pub normalized_shape: usize,
     pub eps: f32,
@@ -40,17 +40,21 @@ impl LayerNorm {
 
 impl Module for LayerNorm {
     fn forward(&self, input: &Tensor) -> Tensor {
-        assert_eq!(input.ndim(), 2, "LayerNorm: 2D (N,C) only");
+        let shape = input.shape();
         let c = self.normalized_shape;
-        assert_eq!(input.shape()[1], c, "LayerNorm: feature dim");
+        assert_eq!(
+            *shape.last().expect("LayerNorm: empty shape"),
+            c,
+            "LayerNorm: last dim"
+        );
+        let rows = input.numel() / c;
         let xi = input.inner.borrow();
-        let n = xi.shape[0];
         let w = self.weight.inner.borrow();
         let b = self.bias.inner.borrow();
-        let mut data = vec![0.0f32; n * c];
-        let mut mean = vec![0.0f32; n];
-        let mut rstd = vec![0.0f32; n];
-        for i in 0..n {
+        let mut data = vec![0.0f32; rows * c];
+        let mut mean = vec![0.0f32; rows];
+        let mut rstd = vec![0.0f32; rows];
+        for i in 0..rows {
             let row = &xi.data[i * c..(i + 1) * c];
             let mut m = 0.0f32;
             for &v in row {
@@ -88,10 +92,10 @@ impl Module for LayerNorm {
         };
         Tensor::from_inner(TensorInner {
             data,
-            shape: vec![n, c],
+            shape,
             requires_grad: rg,
             grad: if rg {
-                Some(vec![0.0; n * c])
+                Some(vec![0.0; rows * c])
             } else {
                 None
             },

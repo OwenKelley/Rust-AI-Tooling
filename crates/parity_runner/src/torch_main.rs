@@ -5,11 +5,14 @@ use std::process;
 use std::time::Instant;
 
 use rtorch::{
-    add, avg_pool2d, cat, clamp, cross_entropy, dropout, exp, gelu, index_select, log, matmul,
-    max_pool2d, mean, mul, pow, relu, reshape, seeded_uniform, sigmoid, softmax, stack, sum, tanh,
+    adaptive_avg_pool2d, add, add_, avg_pool2d, cat, clamp, cross_entropy, dropout, exp, gelu,
+    generate_square_subsequent_mask, index_select, leaky_relu, load_state_dict, log, matmul,
+    max_pool2d, mean, mul, narrow, pow, relu, relu_, reshape, scaled_dot_product_attention_masked,
+    seeded_uniform, sigmoid, silu, softmax, stack, state_dict, state_dict_checksum, sum, tanh,
     transpose, zeros, Adam, AdamW, BatchNorm1d, BatchNorm2d, Conv2d, CosineAnnealingLR,
-    CrossEntropyLoss, DataLoader, Embedding, Flatten, LayerNorm, Linear, Module, MultiStepLR,
-    MSELoss, ReLU, SGD, Sequential, StepLR, TensorDataset,
+    CrossEntropyLoss, DataLoader, Embedding, Flatten, GRU, LSTM, LayerNorm, Linear, Module,
+    MultiStepLR, MultiheadAttention, MSELoss, ReLU, SGD, Sequential, StepLR, Tensor, TensorDataset,
+    TransformerActivation, TransformerDecoderLayer, TransformerEncoder, TransformerEncoderLayer,
 };
 
 #[derive(Debug, Clone)]
@@ -55,6 +58,21 @@ enum Op {
     AvgPool2dForward,
     CosineAnnealingLr,
     DataLoaderEpoch,
+    LeakyRelu,
+    GruForward,
+    StateDictRoundtrip,
+    LstmForward,
+    AdaptiveAvgPool2dForward,
+    AdamStateDictRoundtrip,
+    Silu,
+    MhaForward,
+    TransformerEncoderLayerForward,
+    TransformerEncoderForward,
+    SdpaCausal,
+    TransformerDecoderLayerForward,
+    AddInplace,
+    ReluInplace,
+    Narrow,
 }
 
 impl Op {
@@ -101,6 +119,21 @@ impl Op {
             "avg_pool2d_forward" => Self::AvgPool2dForward,
             "cosineannealinglr" => Self::CosineAnnealingLr,
             "dataloader_epoch" => Self::DataLoaderEpoch,
+            "leaky_relu" => Self::LeakyRelu,
+            "gru_forward" => Self::GruForward,
+            "state_dict_roundtrip" => Self::StateDictRoundtrip,
+            "lstm_forward" => Self::LstmForward,
+            "adaptive_avg_pool2d_forward" => Self::AdaptiveAvgPool2dForward,
+            "adam_state_dict" => Self::AdamStateDictRoundtrip,
+            "silu" => Self::Silu,
+            "mha_forward" => Self::MhaForward,
+            "transformer_encoder_layer_forward" => Self::TransformerEncoderLayerForward,
+            "transformer_encoder_forward" => Self::TransformerEncoderForward,
+            "sdpa_causal" => Self::SdpaCausal,
+            "transformer_decoder_layer_forward" => Self::TransformerDecoderLayerForward,
+            "add_" => Self::AddInplace,
+            "relu_" => Self::ReluInplace,
+            "narrow" => Self::Narrow,
             other => return Err(format!("unknown op '{other}'")),
         })
     }
@@ -148,6 +181,21 @@ impl Op {
             Self::AvgPool2dForward => "avg_pool2d_forward",
             Self::CosineAnnealingLr => "cosineannealinglr",
             Self::DataLoaderEpoch => "dataloader_epoch",
+            Self::LeakyRelu => "leaky_relu",
+            Self::GruForward => "gru_forward",
+            Self::StateDictRoundtrip => "state_dict_roundtrip",
+            Self::LstmForward => "lstm_forward",
+            Self::AdaptiveAvgPool2dForward => "adaptive_avg_pool2d_forward",
+            Self::AdamStateDictRoundtrip => "adam_state_dict",
+            Self::Silu => "silu",
+            Self::MhaForward => "mha_forward",
+            Self::TransformerEncoderLayerForward => "transformer_encoder_layer_forward",
+            Self::TransformerEncoderForward => "transformer_encoder_forward",
+            Self::SdpaCausal => "sdpa_causal",
+            Self::TransformerDecoderLayerForward => "transformer_decoder_layer_forward",
+            Self::AddInplace => "add_",
+            Self::ReluInplace => "relu_",
+            Self::Narrow => "narrow",
         }
     }
 }
@@ -371,6 +419,29 @@ fn dataloader_once(n: usize, seed: u64) -> f64 {
     loader.epoch_checksum()
 }
 
+fn adam_state_dict_once(seed: u64) -> f64 {
+    let x = seeded_uniform(&[8, 4], seed, -1.0, 1.0);
+    let target = make_class_targets(8, 3, seed + 1);
+    let l1 = make_linear(4, 8, seed + 10);
+    let l2 = make_linear(8, 3, seed + 20);
+    let mut params = l1.parameters();
+    params.extend(l2.parameters());
+    let mut opt = Adam::new(params, 0.05);
+    let loss_fn = CrossEntropyLoss;
+    for _ in 0..3 {
+        opt.zero_grad();
+        let h = ReLU.forward(&l1.forward(&x));
+        let logits = l2.forward(&h);
+        let loss = loss_fn.forward(&logits, &target);
+        loss.backward();
+        opt.step();
+    }
+    let sd = opt.state_dict();
+    let mut opt2 = Adam::new(opt.params.clone(), 0.01);
+    opt2.load_state_dict(&sd);
+    opt2.state_dict().checksum()
+}
+
 fn make_emb_indices(n: usize, vocab: usize, seed: u64) -> Vec<usize> {
     let mut state = seed;
     let mut out = Vec::with_capacity(n);
@@ -379,6 +450,81 @@ fn make_emb_indices(n: usize, vocab: usize, seed: u64) -> Vec<usize> {
         out.push(((state >> 8) as usize) % vocab);
     }
     out
+}
+
+fn make_transformer_layer(d_model: usize, nhead: usize, dim_ff: usize, seed: u64) -> TransformerEncoderLayer {
+    let ipw = seeded_uniform(&[3 * d_model, d_model], seed + 1, -0.2, 0.2);
+    let ipb = seeded_uniform(&[3 * d_model], seed + 2, -0.1, 0.1);
+    let ow = seeded_uniform(&[d_model, d_model], seed + 3, -0.2, 0.2);
+    let ob = seeded_uniform(&[d_model], seed + 4, -0.1, 0.1);
+    let mha = MultiheadAttention::from_params(ipw, ipb, ow, ob, nhead);
+    let l1 = Linear::from_params(
+        seeded_uniform(&[dim_ff, d_model], seed + 5, -0.2, 0.2),
+        Some(seeded_uniform(&[dim_ff], seed + 6, -0.1, 0.1)),
+    );
+    let l2 = Linear::from_params(
+        seeded_uniform(&[d_model, dim_ff], seed + 7, -0.2, 0.2),
+        Some(seeded_uniform(&[d_model], seed + 8, -0.1, 0.1)),
+    );
+    let n1 = LayerNorm::from_params(
+        seeded_uniform(&[d_model], seed + 9, 0.5, 1.5),
+        seeded_uniform(&[d_model], seed + 10, -0.1, 0.1),
+        1e-5,
+    );
+    let n2 = LayerNorm::from_params(
+        seeded_uniform(&[d_model], seed + 11, 0.5, 1.5),
+        seeded_uniform(&[d_model], seed + 12, -0.1, 0.1),
+        1e-5,
+    );
+    TransformerEncoderLayer::from_parts(mha, l1, l2, n1, n2, TransformerActivation::Relu)
+}
+
+fn make_mha(d_model: usize, nhead: usize, seed: u64) -> MultiheadAttention {
+    MultiheadAttention::from_params(
+        seeded_uniform(&[3 * d_model, d_model], seed + 1, -0.2, 0.2),
+        seeded_uniform(&[3 * d_model], seed + 2, -0.1, 0.1),
+        seeded_uniform(&[d_model, d_model], seed + 3, -0.2, 0.2),
+        seeded_uniform(&[d_model], seed + 4, -0.1, 0.1),
+        nhead,
+    )
+}
+
+fn make_decoder_layer(d_model: usize, nhead: usize, dim_ff: usize, seed: u64) -> TransformerDecoderLayer {
+    let self_attn = make_mha(d_model, nhead, seed);
+    let cross_attn = make_mha(d_model, nhead, seed + 100);
+    let l1 = Linear::from_params(
+        seeded_uniform(&[dim_ff, d_model], seed + 5, -0.2, 0.2),
+        Some(seeded_uniform(&[dim_ff], seed + 6, -0.1, 0.1)),
+    );
+    let l2 = Linear::from_params(
+        seeded_uniform(&[d_model, dim_ff], seed + 7, -0.2, 0.2),
+        Some(seeded_uniform(&[d_model], seed + 8, -0.1, 0.1)),
+    );
+    let n1 = LayerNorm::from_params(
+        seeded_uniform(&[d_model], seed + 9, 0.5, 1.5),
+        seeded_uniform(&[d_model], seed + 10, -0.1, 0.1),
+        1e-5,
+    );
+    let n2 = LayerNorm::from_params(
+        seeded_uniform(&[d_model], seed + 11, 0.5, 1.5),
+        seeded_uniform(&[d_model], seed + 12, -0.1, 0.1),
+        1e-5,
+    );
+    let n3 = LayerNorm::from_params(
+        seeded_uniform(&[d_model], seed + 13, 0.5, 1.5),
+        seeded_uniform(&[d_model], seed + 14, -0.1, 0.1),
+        1e-5,
+    );
+    TransformerDecoderLayer::from_parts(
+        self_attn,
+        cross_attn,
+        l1,
+        l2,
+        n1,
+        n2,
+        n3,
+        TransformerActivation::Relu,
+    )
 }
 
 fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
@@ -847,6 +993,263 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(dataloader_once(samples, seed));
+                }),
+            )
+        }
+        Op::LeakyRelu => {
+            let a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let checksum = leaky_relu(&a, 0.01).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(leaky_relu(&a, 0.01));
+                }),
+            )
+        }
+        Op::GruForward => {
+            let batch = n.min(4).max(2);
+            let seq = n.min(6).max(3);
+            let input_size = 4usize;
+            let hidden = 5usize;
+            let x = seeded_uniform(&[batch, seq, input_size], seed, -1.0, 1.0);
+            let w_ih = seeded_uniform(&[3 * hidden, input_size], seed + 1, -0.2, 0.2);
+            let w_hh = seeded_uniform(&[3 * hidden, hidden], seed + 2, -0.2, 0.2);
+            let b_ih = seeded_uniform(&[3 * hidden], seed + 3, -0.1, 0.1);
+            let b_hh = seeded_uniform(&[3 * hidden], seed + 4, -0.1, 0.1);
+            let gru = GRU::from_params(w_ih, w_hh, b_ih, b_hh);
+            let (out, _hn) = gru.forward_seq(&x, None);
+            let checksum = out.checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(gru.forward_seq(&x, None).0);
+                }),
+            )
+        }
+        Op::StateDictRoundtrip => {
+            let w = seeded_uniform(&[4, 3], seed, -0.5, 0.5);
+            let b = seeded_uniform(&[4], seed + 1, -0.1, 0.1);
+            let layer = Linear::from_params(w, Some(b));
+            let named = [
+                ("weight", &layer.weight),
+                ("bias", layer.bias.as_ref().unwrap()),
+            ];
+            let sd = state_dict(&named);
+            let w2 = zeros(&[4, 3], true);
+            let b2 = zeros(&[4], true);
+            let layer2 = Linear::from_params(w2, Some(b2));
+            {
+                let named2 = [
+                    ("weight", &layer2.weight),
+                    ("bias", layer2.bias.as_ref().unwrap()),
+                ];
+                load_state_dict(&named2, &sd);
+            }
+            let x = seeded_uniform(&[8, 3], seed + 2, -1.0, 1.0);
+            let checksum = layer2.forward(&x).checksum() + state_dict_checksum(&sd);
+            (
+                checksum,
+                Box::new(move || {
+                    let named2 = [
+                        ("weight", &layer2.weight),
+                        ("bias", layer2.bias.as_ref().unwrap()),
+                    ];
+                    let sd2 = state_dict(&named2);
+                    std::hint::black_box(state_dict_checksum(&sd2));
+                }),
+            )
+        }
+        Op::LstmForward => {
+            let batch = n.min(4).max(2);
+            let seq = n.min(6).max(3);
+            let input_size = 4usize;
+            let hidden = 5usize;
+            let x = seeded_uniform(&[batch, seq, input_size], seed, -1.0, 1.0);
+            let w_ih = seeded_uniform(&[4 * hidden, input_size], seed + 1, -0.2, 0.2);
+            let w_hh = seeded_uniform(&[4 * hidden, hidden], seed + 2, -0.2, 0.2);
+            let b_ih = seeded_uniform(&[4 * hidden], seed + 3, -0.1, 0.1);
+            let b_hh = seeded_uniform(&[4 * hidden], seed + 4, -0.1, 0.1);
+            let lstm = LSTM::from_params(w_ih, w_hh, b_ih, b_hh);
+            let (out, _) = lstm.forward_seq(&x, None);
+            let checksum = out.checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(lstm.forward_seq(&x, None).0);
+                }),
+            )
+        }
+        Op::AdaptiveAvgPool2dForward => {
+            let batch = n.min(4).max(2);
+            let spatial = n.min(8).max(4);
+            let x = seeded_uniform(&[batch, 3, spatial, spatial], seed, -1.0, 1.0);
+            let checksum = adaptive_avg_pool2d(&x, 2, 2).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(adaptive_avg_pool2d(&x, 2, 2));
+                }),
+            )
+        }
+        Op::AdamStateDictRoundtrip => {
+            let checksum = adam_state_dict_once(seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(adam_state_dict_once(seed));
+                }),
+            )
+        }
+        Op::Silu => {
+            let a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let checksum = silu(&a).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(silu(&a));
+                }),
+            )
+        }
+        Op::MhaForward => {
+            let batch = n.min(2).max(1);
+            let seq = n.min(4).max(2);
+            let embed = 8usize;
+            let heads = 2usize;
+            let x = seeded_uniform(&[batch, seq, embed], seed, -1.0, 1.0);
+            let ipw = seeded_uniform(&[3 * embed, embed], seed + 1, -0.2, 0.2);
+            let ipb = seeded_uniform(&[3 * embed], seed + 2, -0.1, 0.1);
+            let ow = seeded_uniform(&[embed, embed], seed + 3, -0.2, 0.2);
+            let ob = seeded_uniform(&[embed], seed + 4, -0.1, 0.1);
+            let mha = MultiheadAttention::from_params(ipw, ipb, ow, ob, heads);
+            let checksum = mha.forward(&x).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(mha.forward(&x));
+                }),
+            )
+        }
+        Op::TransformerEncoderLayerForward => {
+            let batch = n.min(2).max(1);
+            let seq = n.min(4).max(2);
+            let d_model = 8usize;
+            let nhead = 2usize;
+            let dim_ff = 16usize;
+            let x = seeded_uniform(&[batch, seq, d_model], seed, -1.0, 1.0);
+            let layer = make_transformer_layer(d_model, nhead, dim_ff, seed);
+            let checksum = layer.forward(&x).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(layer.forward(&x));
+                }),
+            )
+        }
+        Op::TransformerEncoderForward => {
+            let batch = n.min(2).max(1);
+            let seq = n.min(4).max(2);
+            let d_model = 8usize;
+            let nhead = 2usize;
+            let dim_ff = 16usize;
+            let x = seeded_uniform(&[batch, seq, d_model], seed, -1.0, 1.0);
+            let enc = TransformerEncoder::from_layers(vec![
+                make_transformer_layer(d_model, nhead, dim_ff, seed),
+                make_transformer_layer(d_model, nhead, dim_ff, seed + 100),
+            ]);
+            let checksum = enc.forward(&x).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(enc.forward(&x));
+                }),
+            )
+        }
+        Op::SdpaCausal => {
+            let batch = n.min(2).max(1);
+            let seq = n.min(4).max(2);
+            let d = 8usize;
+            let q = seeded_uniform(&[batch, seq, d], seed, -1.0, 1.0);
+            let k = seeded_uniform(&[batch, seq, d], seed + 1, -1.0, 1.0);
+            let v = seeded_uniform(&[batch, seq, d], seed + 2, -1.0, 1.0);
+            let mask = generate_square_subsequent_mask(seq);
+            let checksum = scaled_dot_product_attention_masked(&q, &k, &v, Some(&mask)).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(scaled_dot_product_attention_masked(
+                        &q,
+                        &k,
+                        &v,
+                        Some(&mask),
+                    ));
+                }),
+            )
+        }
+        Op::TransformerDecoderLayerForward => {
+            let batch = n.min(2).max(1);
+            let tgt_len = n.min(3).max(2);
+            let mem_len = n.min(4).max(2);
+            let d_model = 8usize;
+            let nhead = 2usize;
+            let dim_ff = 16usize;
+            let tgt = seeded_uniform(&[batch, tgt_len, d_model], seed, -1.0, 1.0);
+            let mem = seeded_uniform(&[batch, mem_len, d_model], seed + 1, -1.0, 1.0);
+            let mask = generate_square_subsequent_mask(tgt_len);
+            let layer = make_decoder_layer(d_model, nhead, dim_ff, seed);
+            let checksum = layer.forward(&tgt, &mem, Some(&mask)).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(layer.forward(&tgt, &mem, Some(&mask)));
+                }),
+            )
+        }
+        Op::AddInplace => {
+            let a0 = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let b = seeded_uniform(&[n, n], seed + 1, -1.0, 1.0);
+            let a0_data = a0.data();
+            let work = Tensor::from_vec(a0_data.clone(), &a0.shape(), false);
+            let checksum = {
+                add_(&work, &b);
+                work.checksum()
+            };
+            (
+                checksum,
+                Box::new(move || {
+                    work.copy_from_slice(&a0_data);
+                    add_(&work, &b);
+                    std::hint::black_box(());
+                }),
+            )
+        }
+        Op::ReluInplace => {
+            let a0 = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let a0_data = a0.data();
+            let work = Tensor::from_vec(a0_data.clone(), &a0.shape(), false);
+            let checksum = {
+                relu_(&work);
+                work.checksum()
+            };
+            (
+                checksum,
+                Box::new(move || {
+                    work.copy_from_slice(&a0_data);
+                    relu_(&work);
+                    std::hint::black_box(());
+                }),
+            )
+        }
+        Op::Narrow => {
+            let rows = n.min(16).max(4);
+            let cols = n.min(12).max(4);
+            let a = seeded_uniform(&[rows, cols], seed, -1.0, 1.0);
+            let start = 1usize;
+            let length = (cols / 2).max(1);
+            let checksum = narrow(&a, 1, start, length).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(narrow(&a, 1, start, length));
                 }),
             )
         }

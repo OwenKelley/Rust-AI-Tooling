@@ -56,6 +56,21 @@ OPS = [
     "avg_pool2d_forward",
     "cosineannealinglr",
     "dataloader_epoch",
+    "leaky_relu",
+    "gru_forward",
+    "state_dict_roundtrip",
+    "lstm_forward",
+    "adaptive_avg_pool2d_forward",
+    "adam_state_dict",
+    "silu",
+    "mha_forward",
+    "transformer_encoder_layer_forward",
+    "transformer_encoder_forward",
+    "sdpa_causal",
+    "transformer_decoder_layer_forward",
+    "add_",
+    "relu_",
+    "narrow",
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -151,6 +166,20 @@ def tolerances(op: str) -> tuple[float, float]:
         "gelu",
         "tanh",
         "dataloader_epoch",
+        "gru_forward",
+        "state_dict_roundtrip",
+        "lstm_forward",
+        "adaptive_avg_pool2d_forward",
+        "adam_state_dict",
+        "mha_forward",
+        "silu",
+        "transformer_encoder_layer_forward",
+        "transformer_encoder_forward",
+        "sdpa_causal",
+        "transformer_decoder_layer_forward",
+        "add_",
+        "relu_",
+        "narrow",
     ):
         return 1e-4, 1e-5
     return 1e-5, 1e-6

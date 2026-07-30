@@ -169,6 +169,14 @@ impl Tensor {
         let t = self.inner.borrow();
         Self::from_vec(t.data.clone(), &t.shape, false)
     }
+
+    /// Overwrite storage from a contiguous `src` (same numel). Leaf only.
+    pub fn copy_from_slice(&self, src: &[f32]) {
+        let mut t = self.inner.borrow_mut();
+        assert!(t.grad_fn.is_none(), "copy_from_slice: leaf only");
+        assert_eq!(src.len(), t.data.len());
+        t.data.copy_from_slice(src);
+    }
 }
 
 #[cfg(test)]

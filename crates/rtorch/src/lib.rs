@@ -17,16 +17,21 @@ pub mod tensor;
 pub use context::{is_grad_enabled, no_grad, set_grad_enabled, NoGradGuard};
 pub use data::{DataLoader, TensorDataset};
 pub use functional::{
-    cross_entropy, dropout, gelu, linear, log_softmax, mse_loss, relu, sigmoid, softmax, tanh,
+    cross_entropy, dropout, gelu, leaky_relu, linear, log_softmax, mse_loss, relu,
+    scaled_dot_product_attention, scaled_dot_product_attention_masked, sigmoid, silu, softmax, tanh,
 };
 pub use nn::{
-    avg_pool2d, max_pool2d, AvgPool2d, BatchNorm1d, BatchNorm2d, Conv2d, CrossEntropyLoss, Dropout,
-    Embedding, Flatten, LayerNorm, Linear, MaxPool2d, Module, ModuleList, ReLU, Sequential,
-    Sigmoid, Softmax, GELU, MSELoss, Tanh,
+    adaptive_avg_pool2d, avg_pool2d, generate_square_subsequent_mask, load_state_dict, max_pool2d,
+    state_dict, state_dict_checksum, AdaptiveAvgPool2d, AvgPool2d, BatchNorm1d, BatchNorm2d, Conv2d,
+    CrossEntropyLoss, Dropout, Embedding, Flatten, GRU, LSTM, LayerNorm, LeakyReLU, Linear,
+    MaxPool2d, Module, ModuleList, MultiheadAttention, ReLU, Sequential, Sigmoid, Softmax,
+    StateDict, TransformerActivation, TransformerDecoder, TransformerDecoderLayer,
+    TransformerEncoder, TransformerEncoderLayer, GELU, MSELoss, SiLU, Tanh,
 };
 pub use ops::{
-    abs, add, cat, clamp, div, exp, full, index_select, log, matmul, mean, mul, neg, ones, pow,
-    randn, reshape, seeded_uniform, stack, sub, sum, transpose, zeros,
+    abs, add, add_, bmm, cat, chunk, clamp, div, exp, fill_, full, index_select, log, matmul, mean,
+    mul, mul_, narrow, neg, ones, permute, pow, randn, relu_, reshape, seeded_uniform, select,
+    stack, sub, sub_, sum, transpose, zero_, zeros,
 };
-pub use optim::{Adam, AdamW, CosineAnnealingLR, MultiStepLR, SGD, StepLR};
+pub use optim::{Adam, AdamStateDict, AdamW, CosineAnnealingLR, MultiStepLR, SGD, StepLR};
 pub use tensor::Tensor;

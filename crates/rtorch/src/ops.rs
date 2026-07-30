@@ -116,6 +116,75 @@ unsafe fn bin_avx2(a: &[f32], b: &[f32], out: &mut [f32], kind: BinKind) {
     }
 }
 
+/// In-place `a[i] = a[i] op b[i]` (equal lengths).
+fn bin_apply_inplace(a: &mut [f32], b: &[f32], kind: BinKind) {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                bin_inplace_avx2(a, b, kind);
+            }
+            return;
+        }
+    }
+    match kind {
+        BinKind::Add => {
+            for i in 0..a.len() {
+                a[i] += b[i];
+            }
+        }
+        BinKind::Sub => {
+            for i in 0..a.len() {
+                a[i] -= b[i];
+            }
+        }
+        BinKind::Mul => {
+            for i in 0..a.len() {
+                a[i] *= b[i];
+            }
+        }
+        BinKind::Div => {
+            for i in 0..a.len() {
+                a[i] /= b[i];
+            }
+        }
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn bin_inplace_avx2(a: &mut [f32], b: &[f32], kind: BinKind) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let n = a.len();
+    let mut i = 0;
+    while i + 8 <= n {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+        let vr = match kind {
+            BinKind::Add => _mm256_add_ps(va, vb),
+            BinKind::Sub => _mm256_sub_ps(va, vb),
+            BinKind::Mul => _mm256_mul_ps(va, vb),
+            BinKind::Div => _mm256_div_ps(va, vb),
+        };
+        _mm256_storeu_ps(a.as_mut_ptr().add(i), vr);
+        i += 8;
+    }
+    while i < n {
+        match kind {
+            BinKind::Add => a[i] += b[i],
+            BinKind::Sub => a[i] -= b[i],
+            BinKind::Mul => a[i] *= b[i],
+            BinKind::Div => a[i] /= b[i],
+        }
+        i += 1;
+    }
+}
+
 fn zip_bin(a: &Tensor, b: &Tensor, kind: BinKind, make_gf: impl FnOnce() -> GradFn) -> Tensor {
     let ai = a.inner.borrow();
     let bi = b.inner.borrow();
@@ -123,6 +192,42 @@ fn zip_bin(a: &Tensor, b: &Tensor, kind: BinKind, make_gf: impl FnOnce() -> Grad
     let mut data = vec![0.0f32; shape_len(&out_shape)];
     if ai.shape == out_shape && bi.shape == out_shape {
         bin_apply(ai.data.as_slice(), bi.data.as_slice(), data.as_mut_slice(), kind);
+    } else if ai.shape == out_shape {
+        // Only expand the smaller operand.
+        if bi.shape.len() == 1
+            && out_shape.len() == 2
+            && bi.shape[0] == out_shape[1]
+        {
+            // (M, N) ⊕ (N,) — fuse without materializing broadcast of b.
+            let m = out_shape[0];
+            let n = out_shape[1];
+            let ad = ai.data.as_slice();
+            let bd = bi.data.as_slice();
+            for i in 0..m {
+                let off = i * n;
+                bin_apply(&ad[off..off + n], bd, &mut data[off..off + n], kind);
+            }
+        } else {
+            let bd = expand_to(&bi.data, &bi.shape, &out_shape);
+            bin_apply(ai.data.as_slice(), &bd, data.as_mut_slice(), kind);
+        }
+    } else if bi.shape == out_shape {
+        if ai.shape.len() == 1
+            && out_shape.len() == 2
+            && ai.shape[0] == out_shape[1]
+        {
+            let m = out_shape[0];
+            let n = out_shape[1];
+            let ad = ai.data.as_slice();
+            let bd = bi.data.as_slice();
+            for i in 0..m {
+                let off = i * n;
+                bin_apply(ad, &bd[off..off + n], &mut data[off..off + n], kind);
+            }
+        } else {
+            let ad = expand_to(&ai.data, &ai.shape, &out_shape);
+            bin_apply(&ad, bi.data.as_slice(), data.as_mut_slice(), kind);
+        }
     } else {
         let ad = expand_to(&ai.data, &ai.shape, &out_shape);
         let bd = expand_to(&bi.data, &bi.shape, &out_shape);
@@ -362,8 +467,12 @@ pub fn transpose_data(a: &Tensor) -> Tensor {
     assert_eq!(ai.shape.len(), 2);
     let (m, n) = (ai.shape[0], ai.shape[1]);
     let ad = ai.data.as_slice();
-    let mut out = vec![0.0f32; m * n];
-    const TS: usize = 32;
+    let mut out = Vec::with_capacity(m * n);
+    // Avoid zero-fill; every element is written below.
+    unsafe {
+        out.set_len(m * n);
+    }
+    const TS: usize = 64;
     let mut i0 = 0;
     while i0 < m {
         let i1 = (i0 + TS).min(m);
@@ -371,8 +480,9 @@ pub fn transpose_data(a: &Tensor) -> Tensor {
         while j0 < n {
             let j1 = (j0 + TS).min(n);
             for i in i0..i1 {
+                let src_row = i * n;
                 for j in j0..j1 {
-                    out[j * m + i] = ad[i * n + j];
+                    out[j * m + i] = ad[src_row + j];
                 }
             }
             j0 = j1;
@@ -459,13 +569,11 @@ pub fn cat(tensors: &[&Tensor], dim: usize) -> Tensor {
         for t in tensors {
             let ti = t.inner.borrow();
             let dlen = ti.shape[dim];
-            for k in 0..dlen {
-                for j in 0..inner {
-                    let src = (o * dlen + k) * inner + j;
-                    let dst = (o * out_shape[dim] + col + k) * inner + j;
-                    data[dst] = ti.data[src];
-                }
-            }
+            let chunk = dlen * inner;
+            let src_off = o * chunk;
+            let dst_off = (o * out_shape[dim] + col) * inner;
+            data[dst_off..dst_off + chunk]
+                .copy_from_slice(&ti.data[src_off..src_off + chunk]);
             col += dlen;
         }
     }
@@ -509,7 +617,11 @@ pub fn stack(tensors: &[&Tensor], dim: usize) -> Tensor {
     } else {
         base[dim..].iter().product()
     };
-    let mut data = vec![0.0f32; shape_len(&out_shape)];
+    let out_n = shape_len(&out_shape);
+    let mut data = Vec::with_capacity(out_n);
+    unsafe {
+        data.set_len(out_n);
+    }
     for o in 0..outer {
         for (s, t) in tensors.iter().enumerate() {
             let src = t.inner.borrow();
@@ -542,13 +654,12 @@ pub fn index_select(input: &Tensor, dim: usize, indices: &[usize]) -> Tensor {
     let inner: usize = shape[dim + 1..].iter().product();
     let mut data = vec![0.0f32; shape_len(&out_shape)];
     let src = input.inner.borrow();
+    let nidx = indices.len();
     for o in 0..outer {
         for (new_k, &old_k) in indices.iter().enumerate() {
-            for j in 0..inner {
-                let s = (o * dim_size + old_k) * inner + j;
-                let d = (o * indices.len() + new_k) * inner + j;
-                data[d] = src.data[s];
-            }
+            let s = (o * dim_size + old_k) * inner;
+            let d = (o * nidx + new_k) * inner;
+            data[d..d + inner].copy_from_slice(&src.data[s..s + inner]);
         }
     }
     drop(src);
@@ -566,12 +677,308 @@ pub fn index_select(input: &Tensor, dim: usize, indices: &[usize]) -> Tensor {
     wrap(data, &out_shape, rg, gf)
 }
 
+/// `torch.chunk(input, chunks, dim)` — equal-sized chunks along `dim`.
+pub fn chunk(input: &Tensor, chunks: usize, dim: usize) -> Vec<Tensor> {
+    assert!(chunks > 0);
+    let shape = input.shape();
+    assert!(dim < shape.len());
+    assert_eq!(
+        shape[dim] % chunks,
+        0,
+        "chunk: dim size must divide evenly"
+    );
+    let length = shape[dim] / chunks;
+    let outer: usize = shape[..dim].iter().product();
+    let inner: usize = shape[dim + 1..].iter().product();
+    let src = input.inner.borrow();
+    let rg = wants_grad(&[input]);
+    let mut outs = Vec::with_capacity(chunks);
+    for c in 0..chunks {
+        let start = c * length;
+        let mut out_shape = shape.clone();
+        out_shape[dim] = length;
+        let mut data = vec![0.0f32; shape_len(&out_shape)];
+        for o in 0..outer {
+            for k in 0..length {
+                for j in 0..inner {
+                    let s = (o * shape[dim] + start + k) * inner + j;
+                    let d = (o * length + k) * inner + j;
+                    data[d] = src.data[s];
+                }
+            }
+        }
+        let gf = if rg {
+            Some(GradFn::Chunk {
+                input: input.clone(),
+                dim,
+                start,
+                length,
+            })
+        } else {
+            None
+        };
+        outs.push(wrap(data, &out_shape, rg, gf));
+    }
+    outs
+}
+
+/// Batched matmul: `(B,M,K) @ (B,K,N) -> (B,M,N)`.
+pub fn bmm(a: &Tensor, b: &Tensor) -> Tensor {
+    assert_eq!(a.ndim(), 3, "bmm: 3D a");
+    assert_eq!(b.ndim(), 3, "bmm: 3D b");
+    let ash = a.shape();
+    let bsh = b.shape();
+    assert_eq!(ash[0], bsh[0], "bmm: batch");
+    assert_eq!(ash[2], bsh[1], "bmm: inner");
+    let (batch, m, k) = (ash[0], ash[1], ash[2]);
+    let n = bsh[2];
+    let ai = a.inner.borrow();
+    let bi = b.inner.borrow();
+    let mut data = vec![0.0f32; batch * m * n];
+    for bi_i in 0..batch {
+        let a_off = bi_i * m * k;
+        let b_off = bi_i * k * n;
+        let o_off = bi_i * m * n;
+        let block = gemm_f32(
+            &ai.data[a_off..a_off + m * k],
+            &bi.data[b_off..b_off + k * n],
+            m,
+            k,
+            n,
+        );
+        data[o_off..o_off + m * n].copy_from_slice(&block);
+    }
+    drop((ai, bi));
+    let rg = wants_grad(&[a, b]);
+    let gf = if rg {
+        Some(GradFn::Bmm(Rc::new((a.clone(), b.clone()))))
+    } else {
+        None
+    };
+    wrap(data, &[batch, m, n], rg, gf)
+}
+
+/// `torch.permute(input, dims)`.
+pub fn permute(input: &Tensor, dims: &[usize]) -> Tensor {
+    let shape = input.shape();
+    assert_eq!(dims.len(), shape.len());
+    let mut seen = vec![false; dims.len()];
+    for &d in dims {
+        assert!(d < shape.len());
+        assert!(!seen[d], "permute: duplicate dim");
+        seen[d] = true;
+    }
+    let out_shape: Vec<usize> = dims.iter().map(|&d| shape[d]).collect();
+    let src = input.inner.borrow();
+    let data = crate::autograd::permute_data(&src.data, &shape, dims);
+    drop(src);
+    let rg = wants_grad(&[input]);
+    let gf = if rg {
+        Some(GradFn::Permute {
+            input: input.clone(),
+            dims: dims.to_vec(),
+        })
+    } else {
+        None
+    };
+    wrap(data, &out_shape, rg, gf)
+}
+
+fn assert_inplace_leaf(t: &Tensor) {
+    assert!(
+        t.inner.borrow().grad_fn.is_none(),
+        "in-place ops require a leaf tensor (no grad_fn)"
+    );
+}
+
+/// `tensor.add_(other)` — same-shape only.
+pub fn add_(a: &Tensor, b: &Tensor) {
+    assert_inplace_leaf(a);
+    if Rc::ptr_eq(&a.inner, &b.inner) {
+        let mut ai = a.inner.borrow_mut();
+        let n = ai.data.len();
+        for i in 0..n {
+            ai.data[i] *= 2.0;
+        }
+        return;
+    }
+    let bi = b.inner.borrow();
+    let mut ai = a.inner.borrow_mut();
+    assert_eq!(ai.shape, bi.shape, "add_: same shape only");
+    bin_apply_inplace(ai.data.as_mut_slice(), bi.data.as_slice(), BinKind::Add);
+}
+
+/// `tensor.sub_(other)` — same-shape only.
+pub fn sub_(a: &Tensor, b: &Tensor) {
+    assert_inplace_leaf(a);
+    assert!(!Rc::ptr_eq(&a.inner, &b.inner), "sub_: self alias not supported");
+    let bi = b.inner.borrow();
+    let mut ai = a.inner.borrow_mut();
+    assert_eq!(ai.shape, bi.shape, "sub_: same shape only");
+    bin_apply_inplace(ai.data.as_mut_slice(), bi.data.as_slice(), BinKind::Sub);
+}
+
+/// `tensor.mul_(other)` — same-shape only.
+pub fn mul_(a: &Tensor, b: &Tensor) {
+    assert_inplace_leaf(a);
+    if Rc::ptr_eq(&a.inner, &b.inner) {
+        let mut ai = a.inner.borrow_mut();
+        for v in ai.data.iter_mut() {
+            *v *= *v;
+        }
+        return;
+    }
+    let bi = b.inner.borrow();
+    let mut ai = a.inner.borrow_mut();
+    assert_eq!(ai.shape, bi.shape, "mul_: same shape only");
+    bin_apply_inplace(ai.data.as_mut_slice(), bi.data.as_slice(), BinKind::Mul);
+}
+
+/// `tensor.relu_()`
+pub fn relu_(a: &Tensor) {
+    assert_inplace_leaf(a);
+    let mut ai = a.inner.borrow_mut();
+    relu_inplace_kernel(ai.data.as_mut_slice());
+}
+
+fn relu_inplace_kernel(x: &mut [f32]) {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                relu_inplace_avx2(x);
+            }
+            return;
+        }
+    }
+    for v in x.iter_mut() {
+        if *v < 0.0 {
+            *v = 0.0;
+        }
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn relu_inplace_avx2(x: &mut [f32]) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let zero = _mm256_setzero_ps();
+    let n = x.len();
+    let mut i = 0;
+    while i + 8 <= n {
+        let v = _mm256_loadu_ps(x.as_ptr().add(i));
+        _mm256_storeu_ps(x.as_mut_ptr().add(i), _mm256_max_ps(v, zero));
+        i += 8;
+    }
+    while i < n {
+        if x[i] < 0.0 {
+            x[i] = 0.0;
+        }
+        i += 1;
+    }
+}
+
+/// `tensor.zero_()`
+pub fn zero_(a: &Tensor) {
+    fill_(a, 0.0);
+}
+
+/// `tensor.fill_(value)`
+pub fn fill_(a: &Tensor, value: f32) {
+    assert_inplace_leaf(a);
+    let mut ai = a.inner.borrow_mut();
+    for v in ai.data.iter_mut() {
+        *v = value;
+    }
+}
+
+fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![0usize; shape.len()];
+    if shape.is_empty() {
+        return strides;
+    }
+    let mut s = 1usize;
+    for i in (0..shape.len()).rev() {
+        strides[i] = s;
+        s *= shape[i];
+    }
+    strides
+}
+
+/// `torch.narrow(input, dim, start, length)` — returns an owned contiguous copy.
+pub fn narrow(input: &Tensor, dim: usize, start: usize, length: usize) -> Tensor {
+    let shape = input.shape();
+    assert!(dim < shape.len(), "narrow: dim out of range");
+    assert!(start + length <= shape[dim], "narrow: range out of bounds");
+    let mut out_shape = shape.clone();
+    out_shape[dim] = length;
+    let out_n = shape_len(&out_shape);
+    let strides = contiguous_strides(&shape);
+    let ndim = shape.len();
+    let src = input.inner.borrow();
+    let mut data = vec![0.0f32; out_n];
+    let mut idx = vec![0usize; ndim];
+    for flat in 0..out_n {
+        let mut rem = flat;
+        for d in (0..ndim).rev() {
+            let size = out_shape[d];
+            idx[d] = rem % size;
+            rem /= size;
+        }
+        let mut src_flat = 0usize;
+        for d in 0..ndim {
+            let i = if d == dim { idx[d] + start } else { idx[d] };
+            src_flat += i * strides[d];
+        }
+        data[flat] = src.data[src_flat];
+    }
+    drop(src);
+    // Owned copy; autograd for narrow is not wired yet (leaf / no_grad path).
+    wrap(data, &out_shape, false, None)
+}
+
+/// `torch.select(input, dim, index)` — owned copy with `dim` removed.
+pub fn select(input: &Tensor, dim: usize, index: usize) -> Tensor {
+    let t = narrow(input, dim, index, 1);
+    let mut shape = t.shape();
+    shape.remove(dim);
+    let data = t.data();
+    Tensor::from_vec(data, &shape, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::no_grad;
     use crate::nn::{Linear, Module, ReLU, MSELoss};
     use crate::optim::SGD;
+
+    #[test]
+    fn inplace_add_relu() {
+        let a = seeded_uniform(&[2, 3], 1, -1.0, 1.0);
+        let b = seeded_uniform(&[2, 3], 2, -0.5, 0.5);
+        let expected = add(&a, &b);
+        let t = Tensor::from_vec(a.data(), &a.shape(), false);
+        add_(&t, &b);
+        assert!((t.checksum() - expected.checksum()).abs() < 1e-5);
+        relu_(&t);
+        for &v in &t.data() {
+            assert!(v >= 0.0);
+        }
+    }
+
+    #[test]
+    fn narrow_select_shape() {
+        let a = seeded_uniform(&[4, 5, 3], 3, -1.0, 1.0);
+        let n = narrow(&a, 1, 1, 2);
+        assert_eq!(n.shape(), vec![4, 2, 3]);
+        let s = select(&a, 0, 2);
+        assert_eq!(s.shape(), vec![5, 3]);
+    }
 
     #[test]
     fn train_mlp_loss_decreases() {
