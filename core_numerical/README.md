@@ -7,6 +7,7 @@ and **speed**.
 SciPy slice: see [`SCIPY.md`](SCIPY.md).
 Pandas slice: see [`PANDAS.md`](PANDAS.md).
 PyTorch slice: see [`TORCH.md`](TORCH.md).
+Next slices: see [`ROADMAP.md`](ROADMAP.md).
 
 ## Layout
 
@@ -35,8 +36,8 @@ PyTorch slice: see [`TORCH.md`](TORCH.md).
 | `np.swapaxes` / `moveaxis` | `rnumpy::{swapaxes,moveaxis}` |
 | `np.transpose` / `swapaxes` | O(1) strided views (`transpose_view` / `swapaxes_view`) |
 | `a[start:stop]` slicing | `rnumpy::slice_array` / `NdArray::slice` |
-| `np.take` / `np.compress` | `rnumpy::{take,compress}` |
-| `np.linalg.qr` / `svd` (values) / `eigvalsh` | `rnumpy::{qr,svdvals,eigvalsh}` |
+| `np.take` / `np.compress` / fancy / `take_along_axis` | `rnumpy::{take,compress,boolean_index,fancy_index_2d,take_along_axis}` |
+| `np.linalg.qr` / `svd` / `eig` / `eigvalsh` | `rnumpy::{qr,svd,svdvals,eig,eigvals,eigvalsh}` |
 | `astype(float32)` | `NdArray::astype_f32` / `NdArrayF32` |
 | `np.linalg.solve` / `inv` / `det` | `rnumpy::{solve,inv,det}` |
 | `np.sqrt` / `exp` / `log` / `sin` / `cos` / `tan` / `tanh` | `rnumpy::{sqrt,exp,log,sin,cos,tan,tanh}` |
@@ -112,6 +113,8 @@ Array storage is a local contiguous `NdArray` (`Vec<f64>` + shape) in
 
 ## Next in Core Numerical
 
-Still ahead for deeper NumPy parity: full SVD with U/Vh, general (non-symmetric)
-eigen, richer fancy indexing, and broader dtype coverage beyond f32/f64 cast.
-After that, mirror the harness for SciPy, Pandas, Polars, and PyArrow.
+See [`ROADMAP.md`](ROADMAP.md) for the active plan (NumPy linalg depth → SciPy
+sparse/signal → Pandas time series/Arrow → Polars/PyArrow).
+
+Still ahead for deeper NumPy parity: broader dtype coverage. After that, deepen
+SciPy/Pandas, then mirror harnesses for Polars and PyArrow.

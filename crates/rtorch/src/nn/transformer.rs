@@ -272,12 +272,12 @@ impl TransformerDecoderLayer {
     ) -> Tensor {
         let sa = self
             .self_attn
-            .forward_qkv_masked(tgt, tgt, tgt, tgt_mask)
+            .forward_qkv_masked(tgt, tgt, tgt, tgt_mask, None)
             .0;
         let x = self.norm1.forward(&add(tgt, &sa));
         let ca = self
             .multihead_attn
-            .forward_qkv_masked(&x, memory, memory, None)
+            .forward_qkv_masked(&x, memory, memory, None, None)
             .0;
         let x = self.norm2.forward(&add(&x, &ca));
         let ff = self.ff(&x);
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn causal_mask_upper_blocked() {
         let m = generate_square_subsequent_mask(3);
-        let d = m.inner.borrow().data.clone();
+        let d = m.inner.borrow().dense_data();
         assert_eq!(d[0], 0.0);
         assert!(d[1] < -1e8);
         assert!(d[2] < -1e8);

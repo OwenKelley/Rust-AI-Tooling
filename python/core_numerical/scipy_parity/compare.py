@@ -58,6 +58,8 @@ OPS = [
     "csr_eye",
     "csr_norm",
     "csr_to_csc",
+    "spsolve",
+    "cg",
     "fft",
     "ifft",
     "rfft",

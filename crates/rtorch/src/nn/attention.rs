@@ -31,6 +31,52 @@ fn linear_last(x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
     reshape(&y, &[n, l, out_f])
 }
 
+/// Merge float additive `attn_mask` `(Lq, Lk)` and/or `key_padding_mask` `(N, Lk)`
+/// (values `> 0.5` mean pad → `-1e9`) into `(N*heads, Lq, Lk)`.
+fn combine_masks(
+    n: usize,
+    heads: usize,
+    lq: usize,
+    lk: usize,
+    attn_mask: Option<&Tensor>,
+    key_padding_mask: Option<&Tensor>,
+) -> Option<Tensor> {
+    if attn_mask.is_none() && key_padding_mask.is_none() {
+        return None;
+    }
+    let mut data = vec![0.0f32; n * heads * lq * lk];
+    if let Some(am) = attn_mask {
+        assert_eq!(am.ndim(), 2, "attn_mask: expected 2D (Lq, Lk)");
+        assert_eq!(am.shape(), vec![lq, lk], "attn_mask shape");
+        let amd = am.inner.borrow();
+        for b in 0..(n * heads) {
+            for i in 0..lq {
+                for j in 0..lk {
+                    data[(b * lq + i) * lk + j] += amd.dense_data()[i * lk + j];
+                }
+            }
+        }
+    }
+    if let Some(kpm) = key_padding_mask {
+        assert_eq!(kpm.ndim(), 2, "key_padding_mask: expected 2D (N, Lk)");
+        assert_eq!(kpm.shape(), vec![n, lk], "key_padding_mask shape");
+        let kpd = kpm.inner.borrow();
+        for bi in 0..n {
+            for h in 0..heads {
+                let b = bi * heads + h;
+                for i in 0..lq {
+                    for j in 0..lk {
+                        if kpd.dense_data()[bi * lk + j] > 0.5 {
+                            data[(b * lq + i) * lk + j] += -1e9;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some(Tensor::from_vec(data, &[n * heads, lq, lk], false))
+}
+
 impl MultiheadAttention {
     pub fn new(embed_dim: usize, num_heads: usize, seed: u64) -> Self {
         assert!(embed_dim % num_heads == 0);
@@ -101,16 +147,18 @@ impl MultiheadAttention {
         key: &Tensor,
         value: &Tensor,
     ) -> (Tensor, Option<Tensor>) {
-        self.forward_qkv_masked(query, key, value, None)
+        self.forward_qkv_masked(query, key, value, None, None)
     }
 
-    /// Like `forward_qkv` with optional float additive `attn_mask` of shape `(Lq, Lk)`.
+    /// Like `forward_qkv` with optional float additive `attn_mask` `(Lq, Lk)`
+    /// and/or `key_padding_mask` `(N, Lk)` (`>0.5` = pad).
     pub fn forward_qkv_masked(
         &self,
         query: &Tensor,
         key: &Tensor,
         value: &Tensor,
         attn_mask: Option<&Tensor>,
+        key_padding_mask: Option<&Tensor>,
     ) -> (Tensor, Option<Tensor>) {
         assert_eq!(query.ndim(), 3);
         assert_eq!(key.ndim(), 3);
@@ -143,7 +191,8 @@ impl MultiheadAttention {
         let q2 = reshape(&qh, &[n * self.num_heads, lq, self.head_dim]);
         let k2 = reshape(&kh, &[n * self.num_heads, lk, self.head_dim]);
         let v2 = reshape(&vh, &[n * self.num_heads, lk, self.head_dim]);
-        let ctx = scaled_dot_product_attention_masked(&q2, &k2, &v2, attn_mask);
+        let combined = combine_masks(n, self.num_heads, lq, lk, attn_mask, key_padding_mask);
+        let ctx = scaled_dot_product_attention_masked(&q2, &k2, &v2, combined.as_ref());
         let ctx = reshape(&ctx, &[n, self.num_heads, lq, self.head_dim]);
         let flat = self.from_heads(&ctx, n, lq);
         let out = linear_last(&flat, &self.out_proj.weight, self.out_proj.bias.as_ref());

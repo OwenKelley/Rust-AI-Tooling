@@ -350,6 +350,14 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
         q, r = np.linalg.qr(a, mode="reduced")
         return q @ r, lambda: (lambda qr: qr[0] @ qr[1])(np.linalg.qr(a, mode="reduced"))
 
+    if op == "svd":
+        a = seeded_uniform((n, n // 2 + 1), seed, -1.0, 1.0)
+        u, s, vh = np.linalg.svd(a, full_matrices=False)
+        recon = (u * s) @ vh
+        return recon, lambda: (lambda usv: (usv[0] * usv[1]) @ usv[2])(
+            np.linalg.svd(a, full_matrices=False)
+        )
+
     if op == "svdvals":
         a = seeded_uniform((n, n // 2 + 1), seed, -1.0, 1.0)
         return np.linalg.svd(a, compute_uv=False), lambda: np.linalg.svd(a, compute_uv=False)
@@ -357,6 +365,33 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
     if op == "eigvalsh":
         a = symmetric_spd(n, seed)
         return np.linalg.eigvalsh(a), lambda: np.linalg.eigvalsh(a)
+
+    if op == "eigvals":
+        m = min(n, 16)
+        a = seeded_uniform((m, m), seed, -1.0, 1.0)
+        w = np.linalg.eigvals(a)
+        order = np.lexsort((w.imag, w.real))
+        w = w[order]
+        packed = np.concatenate([w.real, w.imag])
+        return packed, lambda: (lambda ww: np.concatenate([
+            ww.real[np.lexsort((ww.imag, ww.real))],
+            ww.imag[np.lexsort((ww.imag, ww.real))],
+        ]))(np.linalg.eigvals(a))
+
+    if op == "eig":
+        m = min(n, 8)
+        a = seeded_uniform((m, m), seed, -1.0, 1.0)
+
+        def _eig_packed(mat):
+            w, v = np.linalg.eig(mat)
+            res = float(np.abs(mat @ v - v * w).sum())
+            if res < 1e-4:
+                res = 0.0
+            order = np.lexsort((w.imag, w.real))
+            w = w[order]
+            return np.concatenate([w.real, w.imag, [res]])
+
+        return _eig_packed(a), lambda: _eig_packed(a)
 
     if op == "take":
         a = seeded_uniform((n, n), seed, -1.0, 1.0)
@@ -367,6 +402,26 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
         a = seeded_uniform((n,), seed, -1.0, 1.0)
         cond = a > 0.0
         return np.compress(cond, a), lambda: np.compress(cond, a)
+
+    if op == "boolean_index":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        mask = a > 0.0
+        return a[mask], lambda: a[mask]
+
+    if op == "fancy_index_2d":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        k = max(n // 2, 1)
+        rows = np.array([(i * 3) % n for i in range(k)], dtype=np.intp)
+        cols = np.array([(i * 5 + 1) % n for i in range(k)], dtype=np.intp)
+        return a[rows, cols], lambda: a[rows, cols]
+
+    if op == "take_along_axis":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        idx = np.empty((n, n), dtype=np.intp)
+        for i in range(n):
+            for j in range(n):
+                idx[i, j] = (i * 7 + j * 3) % n
+        return np.take_along_axis(a, idx, axis=0), lambda: np.take_along_axis(a, idx, axis=0)
 
     if op == "slice":
         a = seeded_uniform((n, n), seed, -1.0, 1.0)

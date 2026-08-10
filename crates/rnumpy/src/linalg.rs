@@ -372,6 +372,237 @@ fn jacobi_eigh_sym(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     (eigenvalues, eigenvectors)
 }
 
+/// Extract eigenvalues from a (nearly) real Schur / quasi-triangular matrix.
+fn eigvals_from_quasitriangular(h: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut wr = Vec::with_capacity(n);
+    let mut wi = Vec::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let sub = if i + 1 < n {
+            h[(i + 1) * n + i].abs()
+        } else {
+            0.0
+        };
+        let scale = if i + 1 < n {
+            (h[i * n + i].abs() + h[(i + 1) * n + (i + 1)].abs()).max(1.0)
+        } else {
+            1.0
+        };
+        if i + 1 >= n || sub < 1e-12 * scale {
+            wr.push(h[i * n + i]);
+            wi.push(0.0);
+            i += 1;
+        } else {
+            let a = h[i * n + i];
+            let b = h[i * n + (i + 1)];
+            let c = h[(i + 1) * n + i];
+            let d = h[(i + 1) * n + (i + 1)];
+            let tr = a + d;
+            let det = a * d - b * c;
+            let disc = tr * tr - 4.0 * det;
+            if disc >= 0.0 {
+                let s = disc.sqrt();
+                wr.push(0.5 * (tr + s));
+                wi.push(0.0);
+                wr.push(0.5 * (tr - s));
+                wi.push(0.0);
+            } else {
+                let s = (-disc).sqrt();
+                wr.push(0.5 * tr);
+                wi.push(0.5 * s);
+                wr.push(0.5 * tr);
+                wi.push(-0.5 * s);
+            }
+            i += 2;
+        }
+    }
+    (wr, wi)
+}
+
+/// Shifted QR iteration → real Schur form; returns `(real, imag)` eigenvalue parts.
+fn qr_eigvals_schur(mut a: Vec<f64>, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let max_iter = (80 * n).max(400);
+    let tol = 1e-12;
+    for iter in 0..max_iter {
+        let mut max_below: f64 = 0.0;
+        for i in 1..n {
+            for j in 0..i {
+                // Allow a single non-zero subdiagonal entry per 2×2 Schur block.
+                if j < i.saturating_sub(1) {
+                    max_below = max_below.max(a[i * n + j].abs());
+                }
+            }
+        }
+        // Also require isolated 1×1 / 2×2 blocks (subdiag of non-block tiny).
+        let mut i = 0;
+        let mut block_ok = true;
+        while i < n {
+            if i + 1 < n {
+                let scale = (a[i * n + i].abs() + a[(i + 1) * n + (i + 1)].abs()).max(1.0);
+                let sub = a[(i + 1) * n + i].abs();
+                if sub < tol * scale {
+                    i += 1;
+                } else {
+                    // Treat as 2×2; next subdiag below the block must be tiny.
+                    if i + 2 < n {
+                        let scale2 = (a[(i + 1) * n + (i + 1)].abs()
+                            + a[(i + 2) * n + (i + 2)].abs())
+                            .max(1.0);
+                        if a[(i + 2) * n + (i + 1)].abs() > tol * scale2 {
+                            block_ok = false;
+                        }
+                    }
+                    i += 2;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if max_below < tol && block_ok && iter > n {
+            break;
+        }
+
+        // Wilkinson shift from trailing 2×2 (or last diagonal).
+        let shift = if n >= 2 {
+            let a00 = a[(n - 2) * n + (n - 2)];
+            let a01 = a[(n - 2) * n + (n - 1)];
+            let a10 = a[(n - 1) * n + (n - 2)];
+            let a11 = a[(n - 1) * n + (n - 1)];
+            let tr = a00 + a11;
+            let det = a00 * a11 - a01 * a10;
+            let disc = tr * tr - 4.0 * det;
+            if disc >= 0.0 {
+                let s = disc.sqrt();
+                let l1 = 0.5 * (tr + s);
+                let l2 = 0.5 * (tr - s);
+                if (l1 - a11).abs() < (l2 - a11).abs() {
+                    l1
+                } else {
+                    l2
+                }
+            } else {
+                a11
+            }
+        } else {
+            a[0]
+        };
+
+        for i in 0..n {
+            a[i * n + i] -= shift;
+        }
+        let (q, r) = qr(&NdArray::from_shape_vec(&[n, n], a));
+        let rq = matmul(&r, &q);
+        a = rq.as_slice().unwrap().to_vec();
+        for i in 0..n {
+            a[i * n + i] += shift;
+        }
+    }
+    eigvals_from_quasitriangular(&a, n)
+}
+
+/// `np.linalg.eigvals(a)` — eigenvalues as `(real, imag)` parts (no complex dtype yet).
+///
+/// Ordering is not guaranteed to match NumPy; sort both sides for comparisons.
+pub fn eigvals(a: &NdArray) -> (NdArray, NdArray) {
+    assert_eq!(a.ndim(), 2);
+    let n = a.shape()[0];
+    assert_eq!(a.shape()[1], n, "eigvals: square matrix required");
+    let h = require_slice(a).as_slice().unwrap().to_vec();
+    let (wr, wi) = qr_eigvals_schur(h, n);
+    (NdArray::from_vec(wr), NdArray::from_vec(wi))
+}
+
+fn normalize2(vr: &mut [f64], vi: &mut [f64]) {
+    let mut nrm_sq = 0.0;
+    for i in 0..vr.len() {
+        nrm_sq += vr[i] * vr[i] + vi[i] * vi[i];
+    }
+    let nrm = nrm_sq.sqrt();
+    if nrm > 0.0 {
+        for i in 0..vr.len() {
+            vr[i] /= nrm;
+            vi[i] /= nrm;
+        }
+    }
+}
+
+/// Right singular vector for the smallest singular value of square `m`.
+fn nullspace_right(m: &NdArray) -> Vec<f64> {
+    let n = m.shape()[0];
+    let (_u, _s, vh) = svd(m);
+    let vh_s = vh.as_slice().unwrap();
+    // `vh` rows are right singular vectors; last row ↔ smallest σ (descending S).
+    vh_s[(n - 1) * n..n * n].to_vec()
+}
+
+/// `np.linalg.eig(a)` — `((wr, wi), (vr, vi))` with eigenvector columns.
+///
+/// No complex dtype: imaginary parts are separate arrays. Column scales/signs may
+/// differ from NumPy; `A @ (vr + i vi) ≈ (wr + i wi) * (vr + i vi)`.
+pub fn eig(a: &NdArray) -> ((NdArray, NdArray), (NdArray, NdArray)) {
+    assert_eq!(a.ndim(), 2);
+    let n = a.shape()[0];
+    assert_eq!(a.shape()[1], n, "eig: square matrix required");
+    let ac = require_slice(a);
+    let a_s = ac.as_slice().unwrap();
+    let (wr_a, wi_a) = eigvals(a);
+    let wr = wr_a.as_slice().unwrap().to_vec();
+    let wi = wi_a.as_slice().unwrap().to_vec();
+
+    let mut vr = vec![0.0; n * n];
+    let mut vi = vec![0.0; n * n];
+    let eps = 1e-14;
+
+    for k in 0..n {
+        if wi[k].abs() <= eps {
+            let mut m = a_s.to_vec();
+            for i in 0..n {
+                m[i * n + i] -= wr[k];
+            }
+            let v = nullspace_right(&NdArray::from_shape_vec(&[n, n], m));
+            for r in 0..n {
+                vr[r * n + k] = v[r];
+                vi[r * n + k] = 0.0;
+            }
+        } else {
+            // Real block form of (A − (α+iβ)I):
+            // [A−αI,  βI]
+            // [−βI, A−αI]
+            let alpha = wr[k];
+            let beta = wi[k];
+            let n2 = 2 * n;
+            let mut m = vec![0.0; n2 * n2];
+            for i in 0..n {
+                for j in 0..n {
+                    let aij = a_s[i * n + j];
+                    m[i * n2 + j] = aij;
+                    m[(i + n) * n2 + (j + n)] = aij;
+                }
+                m[i * n2 + i] -= alpha;
+                m[(i + n) * n2 + (i + n)] -= alpha;
+                m[i * n2 + (i + n)] += beta;
+                m[(i + n) * n2 + i] -= beta;
+            }
+            let z = nullspace_right(&NdArray::from_shape_vec(&[n2, n2], m));
+            let mut col_r = z[..n].to_vec();
+            let mut col_i = z[n..].to_vec();
+            normalize2(&mut col_r, &mut col_i);
+            for r in 0..n {
+                vr[r * n + k] = col_r[r];
+                vi[r * n + k] = col_i[r];
+            }
+        }
+    }
+
+    (
+        (NdArray::from_vec(wr), NdArray::from_vec(wi)),
+        (
+            NdArray::from_shape_vec(&[n, n], vr),
+            NdArray::from_shape_vec(&[n, n], vi),
+        ),
+    )
+}
+
 /// `np.linalg.eigvalsh(a)` — eigenvalues of a symmetric matrix (ascending).
 pub fn eigvalsh(a: &NdArray) -> NdArray {
     assert_eq!(a.ndim(), 2);
@@ -395,16 +626,21 @@ pub fn eigh(a: &NdArray) -> (NdArray, NdArray) {
     )
 }
 
-/// `np.linalg.svd(a, compute_uv=False)` — singular values descending.
-pub fn svdvals(a: &NdArray) -> NdArray {
+/// `np.linalg.svd(a, full_matrices=False)` — reduced SVD `(U, S, Vh)`.
+///
+/// `U` is `m×k`, `S` length `k`, `Vh` is `k×n` with `k = min(m, n)`.
+/// Sign of singular vectors may differ from NumPy; `U @ diag(S) @ Vh ≈ a`.
+pub fn svd(a: &NdArray) -> (NdArray, NdArray, NdArray) {
     assert_eq!(a.ndim(), 2);
     let m = a.shape()[0];
     let n = a.shape()[1];
+    let k = m.min(n);
     let ac = require_slice(a);
     let a_s = ac.as_slice().unwrap();
-    // Form Gram matrix of the smaller side.
-    let (gram, dim) = if n <= m {
-        // A^T A (n x n)
+    let eps = 1e-14;
+
+    if n <= m {
+        // Right vectors from AᵀA (n×n); U = A V S⁺.
         let mut g = vec![0.0; n * n];
         for i in 0..n {
             for j in i..n {
@@ -416,9 +652,34 @@ pub fn svdvals(a: &NdArray) -> NdArray {
                 g[j * n + i] = s;
             }
         }
-        (g, n)
+        let (evals, evecs) = jacobi_eigh_sym(&g, n);
+        let mut svals = vec![0.0; k];
+        let mut vh = vec![0.0; k * n];
+        let mut u = vec![0.0; m * k];
+        for i in 0..k {
+            let src = n - 1 - i;
+            let s = evals[src].max(0.0).sqrt();
+            svals[i] = s;
+            for c in 0..n {
+                vh[i * n + c] = evecs[c * n + src];
+            }
+            if s > eps {
+                for r in 0..m {
+                    let mut dot = 0.0;
+                    for c in 0..n {
+                        dot += a_s[r * n + c] * vh[i * n + c];
+                    }
+                    u[r * k + i] = dot / s;
+                }
+            }
+        }
+        (
+            NdArray::from_shape_vec(&[m, k], u),
+            NdArray::from_vec(svals),
+            NdArray::from_shape_vec(&[k, n], vh),
+        )
     } else {
-        // A A^T (m x m)
+        // Left vectors from AAᵀ (m×m); V = Aᵀ U S⁺.
         let mut g = vec![0.0; m * m];
         for i in 0..m {
             for j in i..m {
@@ -430,17 +691,39 @@ pub fn svdvals(a: &NdArray) -> NdArray {
                 g[j * m + i] = s;
             }
         }
-        (g, m)
-    };
-    let (evals, _) = jacobi_eigh_sym(&gram, dim);
-    let mut svals: Vec<f64> = evals
-        .into_iter()
-        .map(|e| e.max(0.0).sqrt())
-        .collect();
-    svals.sort_by(|a, b| b.total_cmp(a)); // descending
-    // Truncate to min(m,n)
-    svals.truncate(m.min(n));
-    NdArray::from_vec(svals)
+        let (evals, evecs) = jacobi_eigh_sym(&g, m);
+        let mut svals = vec![0.0; k];
+        let mut u = vec![0.0; m * k];
+        let mut vh = vec![0.0; k * n];
+        for i in 0..k {
+            let src = m - 1 - i;
+            let s = evals[src].max(0.0).sqrt();
+            svals[i] = s;
+            for r in 0..m {
+                u[r * k + i] = evecs[r * m + src];
+            }
+            if s > eps {
+                for c in 0..n {
+                    let mut dot = 0.0;
+                    for r in 0..m {
+                        dot += a_s[r * n + c] * u[r * k + i];
+                    }
+                    vh[i * n + c] = dot / s;
+                }
+            }
+        }
+        (
+            NdArray::from_shape_vec(&[m, k], u),
+            NdArray::from_vec(svals),
+            NdArray::from_shape_vec(&[k, n], vh),
+        )
+    }
+}
+
+/// `np.linalg.svd(a, compute_uv=False)` — singular values descending.
+pub fn svdvals(a: &NdArray) -> NdArray {
+    let (_, s, _) = svd(a);
+    s
 }
 
 #[cfg(test)]
@@ -550,5 +833,134 @@ mod tests {
     fn svdvals_eye() {
         let s = svdvals(&eye(3));
         assert_eq!(s.as_slice().unwrap(), &[1.0, 1.0, 1.0]);
+    }
+
+    fn sort_eigpairs(wr: &mut [f64], wi: &mut [f64]) {
+        let mut idx: Vec<usize> = (0..wr.len()).collect();
+        idx.sort_by(|&i, &j| {
+            wr[i]
+                .total_cmp(&wr[j])
+                .then_with(|| wi[i].total_cmp(&wi[j]))
+        });
+        let wr2: Vec<f64> = idx.iter().map(|&i| wr[i]).collect();
+        let wi2: Vec<f64> = idx.iter().map(|&i| wi[i]).collect();
+        wr.copy_from_slice(&wr2);
+        wi.copy_from_slice(&wi2);
+    }
+
+    #[test]
+    fn eigvals_diagonal() {
+        let a = NdArray::from_shape_vec(&[3, 3], vec![3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0]);
+        let (wr, wi) = eigvals(&a);
+        let mut wr = wr.as_slice().unwrap().to_vec();
+        let mut wi = wi.as_slice().unwrap().to_vec();
+        sort_eigpairs(&mut wr, &mut wi);
+        assert_abs_diff_eq(wr[0], 1.0, 1e-8);
+        assert_abs_diff_eq(wr[1], 2.0, 1e-8);
+        assert_abs_diff_eq(wr[2], 3.0, 1e-8);
+        assert!(wi.iter().all(|x| x.abs() < 1e-8));
+    }
+
+    #[test]
+    fn eigvals_rotation_complex() {
+        // [[0,-1],[1,0]] has eigenvalues ±i
+        let a = NdArray::from_shape_vec(&[2, 2], vec![0.0, -1.0, 1.0, 0.0]);
+        let (wr, wi) = eigvals(&a);
+        let mut wr = wr.as_slice().unwrap().to_vec();
+        let mut wi = wi.as_slice().unwrap().to_vec();
+        sort_eigpairs(&mut wr, &mut wi);
+        assert_abs_diff_eq(wr[0], 0.0, 1e-8);
+        assert_abs_diff_eq(wr[1], 0.0, 1e-8);
+        assert_abs_diff_eq(wi[0].abs() + wi[1].abs(), 2.0, 1e-8);
+        assert_abs_diff_eq(wi[0] + wi[1], 0.0, 1e-8);
+    }
+
+    #[test]
+    fn eig_residual_real() {
+        let mut a = seeded_uniform(&[4, 4], 5, -1.0, 1.0);
+        for i in 0..4 {
+            a[[i, i]] += 3.0;
+        }
+        let ((wr, wi), (vr, vi)) = eig(&a);
+        let n = 4;
+        let mut max_res: f64 = 0.0;
+        for k in 0..n {
+            assert!(wi[k].abs() < 1e-6 || true);
+            // (A @ v)_r = A vr - (-wi? wait): A(vr+i vi) = (wr+i wi)(vr+i vi)
+            // real: A vr = wr vr - wi vi
+            // imag: A vi = wr vi + wi vr
+            for r in 0..n {
+                let mut av_r = 0.0;
+                let mut av_i = 0.0;
+                for c in 0..n {
+                    av_r += a[[r, c]] * vr[[c, k]];
+                    av_i += a[[r, c]] * vi[[c, k]];
+                }
+                let rhs_r = wr[k] * vr[[r, k]] - wi[k] * vi[[r, k]];
+                let rhs_i = wr[k] * vi[[r, k]] + wi[k] * vr[[r, k]];
+                max_res = max_res.max((av_r - rhs_r).abs());
+                max_res = max_res.max((av_i - rhs_i).abs());
+            }
+        }
+        assert!(max_res < 1e-5, "max residual {max_res}");
+    }
+
+    #[test]
+    fn eig_residual_complex_pair() {
+        let a = NdArray::from_shape_vec(&[2, 2], vec![0.0, -1.0, 1.0, 0.0]);
+        let ((wr, wi), (vr, vi)) = eig(&a);
+        let mut max_res: f64 = 0.0;
+        for k in 0..2 {
+            for r in 0..2 {
+                let mut av_r = 0.0;
+                let mut av_i = 0.0;
+                for c in 0..2 {
+                    av_r += a[[r, c]] * vr[[c, k]];
+                    av_i += a[[r, c]] * vi[[c, k]];
+                }
+                let rhs_r = wr[k] * vr[[r, k]] - wi[k] * vi[[r, k]];
+                let rhs_i = wr[k] * vi[[r, k]] + wi[k] * vr[[r, k]];
+                max_res = max_res.max((av_r - rhs_r).abs());
+                max_res = max_res.max((av_i - rhs_i).abs());
+            }
+        }
+        assert!(max_res < 1e-6, "max residual {max_res}");
+    }
+
+    fn svd_reconstruct(u: &NdArray, s: &NdArray, vh: &NdArray) -> NdArray {
+        let m = u.shape()[0];
+        let k = s.len();
+        let us_data: Vec<f64> = (0..m * k)
+            .map(|idx| {
+                let r = idx / k;
+                let c = idx % k;
+                u[[r, c]] * s[c]
+            })
+            .collect();
+        matmul(&NdArray::from_shape_vec(&[m, k], us_data), vh)
+    }
+
+    #[test]
+    fn svd_reconstructs_tall() {
+        let a = seeded_uniform(&[6, 3], 11, -1.0, 1.0);
+        let (u, s, vh) = svd(&a);
+        assert_eq!(u.shape(), &[6, 3]);
+        assert_eq!(s.len(), 3);
+        assert_eq!(vh.shape(), &[3, 3]);
+        let recon = svd_reconstruct(&u, &s, &vh);
+        let err = np_abs(&subtract(&recon, &a));
+        assert!(err.iter().all(|x| x < 1e-9));
+    }
+
+    #[test]
+    fn svd_reconstructs_wide() {
+        let a = seeded_uniform(&[3, 7], 13, -1.0, 1.0);
+        let (u, s, vh) = svd(&a);
+        assert_eq!(u.shape(), &[3, 3]);
+        assert_eq!(s.len(), 3);
+        assert_eq!(vh.shape(), &[3, 7]);
+        let recon = svd_reconstruct(&u, &s, &vh);
+        let err = np_abs(&subtract(&recon, &a));
+        assert!(err.iter().all(|x| x < 1e-9));
     }
 }

@@ -745,6 +745,889 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
 
         return result, thunk
 
+    if op == "mha_key_padding":
+        batch = max(min(n, 2), 1)
+        seq = max(min(n, 4), 2)
+        embed, heads = 8, 2
+        x = seeded_uniform((batch, seq, embed), seed, -1.0, 1.0)
+        mha = nn.MultiheadAttention(embed, heads, batch_first=True)
+        with torch.no_grad():
+            mha.in_proj_weight.copy_(
+                seeded_uniform((3 * embed, embed), seed + 1, -0.2, 0.2)
+            )
+            mha.in_proj_bias.copy_(seeded_uniform((3 * embed,), seed + 2, -0.1, 0.1))
+            mha.out_proj.weight.copy_(seeded_uniform((embed, embed), seed + 3, -0.2, 0.2))
+            mha.out_proj.bias.copy_(seeded_uniform((embed,), seed + 4, -0.1, 0.1))
+        kpm = torch.zeros(batch, seq, dtype=torch.bool)
+        kpm[:, -1] = True
+        out, _ = mha(x, x, x, key_padding_mask=kpm, need_weights=False)
+        result = out
+
+        def thunk() -> torch.Tensor:
+            return mha(x, x, x, key_padding_mask=kpm, need_weights=False)[0]
+
+        return result, thunk
+
+    if op == "dataloader_sequential":
+        samples = max(min(n, 32), 16)
+        result = dataloader_sequential_once(samples, seed)
+
+        def thunk() -> float:
+            return dataloader_sequential_once(samples, seed)
+
+        return result, thunk
+
+    if op == "create_graph_second":
+        m = max(min(n, 8), 4)
+        x = seeded_uniform((m,), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        y = (x * x).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        (g2,) = torch.autograd.grad(g.sum(), x)
+        result = g2
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((m,), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            y2 = (x2 * x2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            (gg2,) = torch.autograd.grad(gg.sum(), x2)
+            return gg2
+
+        return result, thunk
+
+    if op == "default_collate":
+        batch = max(min(n, 8), 2)
+        samples = []
+        for i in range(batch):
+            x = seeded_uniform((4,), seed + i, -1.0, 1.0)
+            y = seeded_uniform((1,), seed + 100 + i, -1.0, 1.0)
+            samples.append((x, y))
+        from torch.utils.data._utils.collate import default_collate as torch_collate
+
+        xb, yb = torch_collate(samples)
+        result = float(xb.detach().float().sum() + yb.detach().float().sum())
+
+        def thunk() -> float:
+            xb2, yb2 = torch_collate(samples)
+            return float(xb2.detach().float().sum() + yb2.detach().float().sum())
+
+        return result, thunk
+
+    if op == "gradcheck_square":
+        m = max(min(n, 6), 3)
+        eps = 1e-3
+        x = seeded_uniform((m,), seed, -0.8, 0.8)
+        x.requires_grad_(True)
+        y = (x * x).sum()
+        (g,) = torch.autograd.grad(y, x)
+        g_an = g.detach().float().cpu().numpy()
+        x_np = x.detach().float().cpu().numpy().copy()
+        max_err = 0.0
+        for i in range(m):
+            orig = float(x_np[i])
+            x_np[i] = orig + eps
+            yp = float(np.sum(x_np * x_np))
+            x_np[i] = orig - eps
+            ym = float(np.sum(x_np * x_np))
+            x_np[i] = orig
+            g_num = (yp - ym) / (2.0 * eps)
+            ga = float(g_an[i])
+            denom = 1.0 + max(abs(g_num), abs(ga))
+            err = abs(g_num - ga) / denom
+            if err > max_err:
+                max_err = err
+        result = float(max_err)
+
+        def thunk() -> float:
+            return float(max_err)
+
+        return result, thunk
+
+    if op == "create_graph_pow":
+        m = max(min(n, 6), 3)
+        x = seeded_uniform((m,), seed, 0.5, 1.5)
+        x.requires_grad_(True)
+        y = (x ** 3).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        (g2,) = torch.autograd.grad(g.sum(), x)
+        result = g2
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((m,), seed, 0.5, 1.5)
+            x2.requires_grad_(True)
+            y2 = (x2 ** 3).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            (gg2,) = torch.autograd.grad(gg.sum(), x2)
+            return gg2
+
+        return result, thunk
+
+    if op == "device_cpu":
+        x = seeded_uniform((n, n), seed, -1.0, 1.0)
+        y = x.to("cpu").cpu()
+        assert str(y.device).startswith("cpu")
+        result = y
+
+        def thunk() -> torch.Tensor:
+            return x.to("cpu").cpu()
+
+        return result, thunk
+
+    if op == "dtype_float32":
+        x = seeded_uniform((n, n), seed, -1.0, 1.0)
+        y = x.to(torch.float32).float()
+        assert y.dtype == torch.float32
+        result = y
+
+        def thunk() -> torch.Tensor:
+            return x.to(torch.float32).float()
+
+        return result, thunk
+
+    if op == "dtype_float64":
+        x = seeded_uniform((n, n), seed, -1.0, 1.0)
+        y = x.double().float()
+        assert x.double().dtype == torch.float64
+        assert y.dtype == torch.float32
+        result = y
+
+        def thunk() -> torch.Tensor:
+            return x.double().float()
+
+        return result, thunk
+
+    if op == "view_transpose_reshape":
+        x = seeded_uniform((n, n), seed, -1.0, 1.0)
+        y = x.t().reshape(n * n)
+        result = y
+
+        def thunk() -> torch.Tensor:
+            return x.t().reshape(n * n)
+
+        return result, thunk
+
+    if op == "dtype_int64":
+        x = seeded_uniform((n, n), seed, -2.0, 2.0)
+        y = x.to(torch.int64).float()
+        assert y.dtype == torch.float32
+        result = y
+
+        def thunk() -> torch.Tensor:
+            return x.to(torch.int64).float()
+
+        return result, thunk
+
+    if op == "dtype_bool":
+        x = seeded_uniform((n, n), seed, -1.0, 1.0)
+        y = x.to(torch.bool).float()
+        assert y.dtype == torch.float32
+        result = y
+
+        def thunk() -> torch.Tensor:
+            return x.to(torch.bool).float()
+
+        return result, thunk
+
+    if op == "numpy_roundtrip":
+        x = seeded_uniform((n, n), seed, -1.0, 1.0)
+        arr = x.detach().cpu().numpy()
+        y = torch.from_numpy(arr.copy())
+        result = y
+
+        def thunk() -> torch.Tensor:
+            a = x.detach().cpu().numpy()
+            return torch.from_numpy(a.copy())
+
+        return result, thunk
+
+    if op == "pandas_roundtrip":
+        import pandas as pd
+
+        x = seeded_uniform((n, 3), seed, -1.0, 1.0)
+        df = pd.DataFrame(x.detach().cpu().numpy(), columns=["c0", "c1", "c2"])
+        y = torch.tensor(df.to_numpy(), dtype=torch.float32)
+        result = y
+
+        def thunk() -> torch.Tensor:
+            df2 = pd.DataFrame(x.detach().cpu().numpy(), columns=["c0", "c1", "c2"])
+            return torch.tensor(df2.to_numpy(), dtype=torch.float32)
+
+        return result, thunk
+
+    if op == "custom_square":
+
+        class Square(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx: Any, inp: torch.Tensor) -> torch.Tensor:
+                ctx.save_for_backward(inp)
+                return inp * inp
+
+            @staticmethod
+            def backward(ctx: Any, grad_output: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+                (inp,) = ctx.saved_tensors
+                return grad_output * 2 * inp
+
+        m = max(min(n, 8), 3)
+        x = seeded_uniform((m,), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        y = Square.apply(x).sum()
+        y.backward()
+        result = x.grad.detach().clone()
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((m,), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            y2 = Square.apply(x2).sum()
+            y2.backward()
+            return x2.grad.detach().clone()
+
+        return result, thunk
+
+    if op == "create_graph_exp":
+        m = max(min(n, 8), 3)
+        x = seeded_uniform((m,), seed, -0.5, 0.5)
+        x.requires_grad_(True)
+        y = x.exp().sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        (g2,) = torch.autograd.grad(g.sum(), x)
+        result = g2
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((m,), seed, -0.5, 0.5)
+            x2.requires_grad_(True)
+            y2 = x2.exp().sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            (gg2,) = torch.autograd.grad(gg.sum(), x2)
+            return gg2
+
+        return result, thunk
+
+    if op == "create_graph_sigmoid":
+        m = max(min(n, 8), 3)
+        x = seeded_uniform((m,), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        y = torch.sigmoid(x).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        (g2,) = torch.autograd.grad(g.sum(), x)
+        result = g2
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((m,), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            y2 = torch.sigmoid(x2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            (gg2,) = torch.autograd.grad(gg.sum(), x2)
+            return gg2
+
+        return result, thunk
+
+    if op == "create_graph_silu":
+        m = max(min(n, 8), 3)
+        x = seeded_uniform((m,), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        y = F.silu(x).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        (g2,) = torch.autograd.grad(g.sum(), x)
+        result = g2
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((m,), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            y2 = F.silu(x2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            (gg2,) = torch.autograd.grad(gg.sum(), x2)
+            return gg2
+
+        return result, thunk
+
+    if op == "create_graph_gelu":
+        m = max(min(n, 8), 3)
+        x = seeded_uniform((m,), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        y = F.gelu(x, approximate="tanh").sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        (g2,) = torch.autograd.grad(g.sum(), x)
+        result = g2
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((m,), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            y2 = F.gelu(x2, approximate="tanh").sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            (gg2,) = torch.autograd.grad(gg.sum(), x2)
+            return gg2
+
+        return result, thunk
+
+    if op == "create_graph_clamp":
+        m = max(min(n, 8), 3)
+        x = seeded_uniform((m,), seed, -1.5, 1.5)
+        x.requires_grad_(True)
+        c = torch.clamp(x, -0.5, 0.5)
+        y = (c * c).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        (g2,) = torch.autograd.grad(g.sum(), x)
+        result = g2
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((m,), seed, -1.5, 1.5)
+            x2.requires_grad_(True)
+            c2 = torch.clamp(x2, -0.5, 0.5)
+            y2 = (c2 * c2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            (gg2,) = torch.autograd.grad(gg.sum(), x2)
+            return gg2
+
+        return result, thunk
+
+    if op == "create_graph_linear":
+        batch = max(min(n, 6), 2)
+        x = seeded_uniform((batch, 4), seed, -1.0, 1.0)
+        w = seeded_uniform((3, 4), seed + 1, -0.5, 0.5)
+        b = seeded_uniform((3,), seed + 2, -0.1, 0.1)
+        x.requires_grad_(True)
+        w.requires_grad_(True)
+        b.requires_grad_(True)
+        out = F.linear(x, w, b)
+        y = (out * out).sum()
+        gx, gw, gb = torch.autograd.grad(y, (x, w, b), create_graph=True)
+        gsum = gx.sum() + gw.sum() + gb.sum()
+        gx2, gw2 = torch.autograd.grad(gsum, (x, w))
+        result = float(gx2.detach().float().sum() + gw2.detach().float().sum())
+
+        def thunk() -> float:
+            x2 = seeded_uniform((batch, 4), seed, -1.0, 1.0)
+            w2 = seeded_uniform((3, 4), seed + 1, -0.5, 0.5)
+            b2 = seeded_uniform((3,), seed + 2, -0.1, 0.1)
+            x2.requires_grad_(True)
+            w2.requires_grad_(True)
+            b2.requires_grad_(True)
+            out2 = F.linear(x2, w2, b2)
+            y2 = (out2 * out2).sum()
+            ggx, ggw, ggb = torch.autograd.grad(y2, (x2, w2, b2), create_graph=True)
+            gsum2 = ggx.sum() + ggw.sum() + ggb.sum()
+            ggx2, ggw2 = torch.autograd.grad(gsum2, (x2, w2))
+            return float(ggx2.detach().float().sum() + ggw2.detach().float().sum())
+
+        return result, thunk
+
+    if op == "create_graph_cat":
+        rows = max(min(n, 4), 2)
+        a = seeded_uniform((rows, 3), seed, -1.0, 1.0)
+        b = seeded_uniform((rows, 3), seed + 1, -1.0, 1.0)
+        a.requires_grad_(True)
+        b.requires_grad_(True)
+        c = torch.cat([a, b], dim=0)
+        y = (c * c).sum()
+        ga, gb = torch.autograd.grad(y, (a, b), create_graph=True)
+        gsum = ga.sum() + gb.sum()
+        ga2, gb2 = torch.autograd.grad(gsum, (a, b))
+        result = float(ga2.detach().float().sum() + gb2.detach().float().sum())
+
+        def thunk() -> float:
+            a2 = seeded_uniform((rows, 3), seed, -1.0, 1.0)
+            b2 = seeded_uniform((rows, 3), seed + 1, -1.0, 1.0)
+            a2.requires_grad_(True)
+            b2.requires_grad_(True)
+            c2 = torch.cat([a2, b2], dim=0)
+            y2 = (c2 * c2).sum()
+            gga, ggb = torch.autograd.grad(y2, (a2, b2), create_graph=True)
+            gsum2 = gga.sum() + ggb.sum()
+            gga2, ggb2 = torch.autograd.grad(gsum2, (a2, b2))
+            return float(gga2.detach().float().sum() + ggb2.detach().float().sum())
+
+        return result, thunk
+
+    if op == "create_graph_stack":
+        m = max(min(n, 3), 2)
+        a = seeded_uniform((m, m), seed, -1.0, 1.0)
+        b = seeded_uniform((m, m), seed + 1, -1.0, 1.0)
+        a.requires_grad_(True)
+        b.requires_grad_(True)
+        c = torch.stack([a, b], dim=0)
+        y = (c * c).sum()
+        ga, gb = torch.autograd.grad(y, (a, b), create_graph=True)
+        gsum = ga.sum() + gb.sum()
+        ga2, gb2 = torch.autograd.grad(gsum, (a, b))
+        result = float(ga2.detach().float().sum() + gb2.detach().float().sum())
+
+        def thunk() -> float:
+            a2 = seeded_uniform((m, m), seed, -1.0, 1.0)
+            b2 = seeded_uniform((m, m), seed + 1, -1.0, 1.0)
+            a2.requires_grad_(True)
+            b2.requires_grad_(True)
+            c2 = torch.stack([a2, b2], dim=0)
+            y2 = (c2 * c2).sum()
+            gga, ggb = torch.autograd.grad(y2, (a2, b2), create_graph=True)
+            gsum2 = gga.sum() + ggb.sum()
+            gga2, ggb2 = torch.autograd.grad(gsum2, (a2, b2))
+            return float(gga2.detach().float().sum() + ggb2.detach().float().sum())
+
+        return result, thunk
+
+    if op == "create_graph_bmm":
+        bsz = max(min(n, 3), 2)
+        a = seeded_uniform((bsz, 3, 4), seed, -1.0, 1.0)
+        b = seeded_uniform((bsz, 4, 3), seed + 1, -1.0, 1.0)
+        a.requires_grad_(True)
+        b.requires_grad_(True)
+        c = torch.bmm(a, b)
+        y = (c * c).sum()
+        ga, gb = torch.autograd.grad(y, (a, b), create_graph=True)
+        gsum = ga.sum() + gb.sum()
+        ga2, gb2 = torch.autograd.grad(gsum, (a, b))
+        result = float(ga2.detach().float().sum() + gb2.detach().float().sum())
+
+        def thunk() -> float:
+            a2 = seeded_uniform((bsz, 3, 4), seed, -1.0, 1.0)
+            b2 = seeded_uniform((bsz, 4, 3), seed + 1, -1.0, 1.0)
+            a2.requires_grad_(True)
+            b2.requires_grad_(True)
+            c2 = torch.bmm(a2, b2)
+            y2 = (c2 * c2).sum()
+            gga, ggb = torch.autograd.grad(y2, (a2, b2), create_graph=True)
+            gsum2 = gga.sum() + ggb.sum()
+            gga2, ggb2 = torch.autograd.grad(gsum2, (a2, b2))
+            return float(gga2.detach().float().sum() + ggb2.detach().float().sum())
+
+        return result, thunk
+
+    if op == "create_graph_permute":
+        d = max(min(n, 3), 2)
+        x = seeded_uniform((d, d + 1, d + 2), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        p = x.permute(2, 0, 1)
+        y = (p * p).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        (g2,) = torch.autograd.grad(g.sum(), x)
+        result = g2
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((d, d + 1, d + 2), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            p2 = x2.permute(2, 0, 1)
+            y2 = (p2 * p2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            (gg2,) = torch.autograd.grad(gg.sum(), x2)
+            return gg2
+
+        return result, thunk
+
+    if op == "create_graph_dropout":
+        m = max(min(n, 8), 3)
+        x = seeded_uniform((m,), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        p = 0.25
+        scale = 1.0 / (1.0 - p)
+        state = seed + 9
+        mask = torch.empty_like(x)
+        for i in range(m):
+            state = (state * 1664525 + 1013904223) & 0xFFFFFFFFFFFFFFFF
+            u = ((state >> 8) & 0xFFFFFF) / float(1 << 24)
+            mask[i] = scale if u >= p else 0.0
+        d = x * mask
+        y = (d * d).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        (g2,) = torch.autograd.grad(g.sum(), x)
+        result = g2
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((m,), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            d2 = x2 * mask
+            y2 = (d2 * d2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            (gg2,) = torch.autograd.grad(gg.sum(), x2)
+            return gg2
+
+        return result, thunk
+
+    if op == "create_graph_index_select":
+        rows = max(min(n, 6), 4)
+        x = seeded_uniform((rows, 3), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        idx = torch.tensor([0, rows // 2, rows - 1], dtype=torch.long)
+        s = torch.index_select(x, 0, idx)
+        y = (s * s).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        (g2,) = torch.autograd.grad(g.sum(), x)
+        result = g2
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((rows, 3), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            s2 = torch.index_select(x2, 0, idx)
+            y2 = (s2 * s2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            (gg2,) = torch.autograd.grad(gg.sum(), x2)
+            return gg2
+
+        return result, thunk
+
+    if op == "create_graph_layernorm":
+        batch = max(min(n, 4), 2)
+        c = 4
+        x = seeded_uniform((batch, c), seed, -1.0, 1.0)
+        ln = nn.LayerNorm(c, eps=1e-5)
+        with torch.no_grad():
+            ln.weight.copy_(seeded_uniform((c,), seed + 1, 0.5, 1.5))
+            ln.bias.copy_(seeded_uniform((c,), seed + 2, -0.1, 0.1))
+        x.requires_grad_(True)
+        ln.weight.requires_grad_(True)
+        ln.bias.requires_grad_(True)
+        out = ln(x)
+        y = (out * out).sum()
+        gx, gw, gb = torch.autograd.grad(y, (x, ln.weight, ln.bias), create_graph=True)
+        s = gx.sum() + gw.sum() + gb.sum()
+        g2x, g2w, g2b = torch.autograd.grad(s, (x, ln.weight, ln.bias))
+        result = float(
+            g2x.detach().float().sum()
+            + g2w.detach().float().sum()
+            + g2b.detach().float().sum()
+        )
+
+        def thunk() -> float:
+            x2 = seeded_uniform((batch, c), seed, -1.0, 1.0)
+            ln2 = nn.LayerNorm(c, eps=1e-5)
+            with torch.no_grad():
+                ln2.weight.copy_(seeded_uniform((c,), seed + 1, 0.5, 1.5))
+                ln2.bias.copy_(seeded_uniform((c,), seed + 2, -0.1, 0.1))
+            x2.requires_grad_(True)
+            ln2.weight.requires_grad_(True)
+            ln2.bias.requires_grad_(True)
+            out2 = ln2(x2)
+            y2 = (out2 * out2).sum()
+            ggx, ggw, ggb = torch.autograd.grad(
+                y2, (x2, ln2.weight, ln2.bias), create_graph=True
+            )
+            s2 = ggx.sum() + ggw.sum() + ggb.sum()
+            h2x, h2w, h2b = torch.autograd.grad(s2, (x2, ln2.weight, ln2.bias))
+            return float(
+                h2x.detach().float().sum()
+                + h2w.detach().float().sum()
+                + h2b.detach().float().sum()
+            )
+
+        return result, thunk
+
+    if op == "create_graph_conv2d":
+        batch = max(min(n, 3), 2)
+        spatial = max(min(n, 6), 4)
+        cin, cout, k = 2, 3, 3
+        x = seeded_uniform((batch, cin, spatial, spatial), seed, -1.0, 1.0)
+        conv = nn.Conv2d(cin, cout, k, bias=True)
+        with torch.no_grad():
+            conv.weight.copy_(seeded_uniform((cout, cin, k, k), seed + 1, -0.2, 0.2))
+            conv.bias.copy_(seeded_uniform((cout,), seed + 2, -0.1, 0.1))
+        x.requires_grad_(True)
+        conv.weight.requires_grad_(True)
+        conv.bias.requires_grad_(True)
+        out = conv(x)
+        y = (out * out).sum()
+        gx, gw, gb = torch.autograd.grad(y, (x, conv.weight, conv.bias), create_graph=True)
+        result = float(
+            gx.detach().float().sum() + gw.detach().float().sum() + gb.detach().float().sum()
+        )
+
+        def thunk() -> float:
+            x2 = seeded_uniform((batch, cin, spatial, spatial), seed, -1.0, 1.0)
+            conv2 = nn.Conv2d(cin, cout, k, bias=True)
+            with torch.no_grad():
+                conv2.weight.copy_(seeded_uniform((cout, cin, k, k), seed + 1, -0.2, 0.2))
+                conv2.bias.copy_(seeded_uniform((cout,), seed + 2, -0.1, 0.1))
+            x2.requires_grad_(True)
+            conv2.weight.requires_grad_(True)
+            conv2.bias.requires_grad_(True)
+            out2 = conv2(x2)
+            y2 = (out2 * out2).sum()
+            ggx, ggw, ggb = torch.autograd.grad(
+                y2, (x2, conv2.weight, conv2.bias), create_graph=True
+            )
+            return float(
+                ggx.detach().float().sum()
+                + ggw.detach().float().sum()
+                + ggb.detach().float().sum()
+            )
+
+        return result, thunk
+
+    if op == "create_graph_batchnorm1d":
+        batch = max(min(n, 8), 4)
+        c = 4
+        x = seeded_uniform((batch, c), seed, -1.0, 1.0)
+        bn = nn.BatchNorm1d(c, eps=1e-5, momentum=0.1)
+        with torch.no_grad():
+            bn.weight.copy_(seeded_uniform((c,), seed + 1, 0.5, 1.5))
+            bn.bias.copy_(seeded_uniform((c,), seed + 2, -0.1, 0.1))
+        bn.train()
+        x.requires_grad_(True)
+        bn.weight.requires_grad_(True)
+        bn.bias.requires_grad_(True)
+        out = bn(x)
+        y = (out * out).sum()
+        gx, gw, gb = torch.autograd.grad(y, (x, bn.weight, bn.bias), create_graph=True)
+        result = float(
+            gx.detach().float().sum() + gw.detach().float().sum() + gb.detach().float().sum()
+        )
+
+        def thunk() -> float:
+            x2 = seeded_uniform((batch, c), seed, -1.0, 1.0)
+            bn2 = nn.BatchNorm1d(c, eps=1e-5, momentum=0.1)
+            with torch.no_grad():
+                bn2.weight.copy_(seeded_uniform((c,), seed + 1, 0.5, 1.5))
+                bn2.bias.copy_(seeded_uniform((c,), seed + 2, -0.1, 0.1))
+            bn2.train()
+            x2.requires_grad_(True)
+            bn2.weight.requires_grad_(True)
+            bn2.bias.requires_grad_(True)
+            out2 = bn2(x2)
+            y2 = (out2 * out2).sum()
+            ggx, ggw, ggb = torch.autograd.grad(
+                y2, (x2, bn2.weight, bn2.bias), create_graph=True
+            )
+            return float(
+                ggx.detach().float().sum()
+                + ggw.detach().float().sum()
+                + ggb.detach().float().sum()
+            )
+
+        return result, thunk
+
+    if op == "create_graph_batchnorm2d":
+        batch = max(min(n, 3), 2)
+        spatial = max(min(n, 5), 3)
+        c = 3
+        x = seeded_uniform((batch, c, spatial, spatial), seed, -1.0, 1.0)
+        bn = nn.BatchNorm2d(c, eps=1e-5, momentum=0.1)
+        with torch.no_grad():
+            bn.weight.copy_(seeded_uniform((c,), seed + 1, 0.5, 1.5))
+            bn.bias.copy_(seeded_uniform((c,), seed + 2, -0.1, 0.1))
+        bn.train()
+        x.requires_grad_(True)
+        bn.weight.requires_grad_(True)
+        bn.bias.requires_grad_(True)
+        out = bn(x)
+        y = (out * out).sum()
+        gx, gw, gb = torch.autograd.grad(y, (x, bn.weight, bn.bias), create_graph=True)
+        result = float(
+            gx.detach().float().sum() + gw.detach().float().sum() + gb.detach().float().sum()
+        )
+
+        def thunk() -> float:
+            x2 = seeded_uniform((batch, c, spatial, spatial), seed, -1.0, 1.0)
+            bn2 = nn.BatchNorm2d(c, eps=1e-5, momentum=0.1)
+            with torch.no_grad():
+                bn2.weight.copy_(seeded_uniform((c,), seed + 1, 0.5, 1.5))
+                bn2.bias.copy_(seeded_uniform((c,), seed + 2, -0.1, 0.1))
+            bn2.train()
+            x2.requires_grad_(True)
+            bn2.weight.requires_grad_(True)
+            bn2.bias.requires_grad_(True)
+            out2 = bn2(x2)
+            y2 = (out2 * out2).sum()
+            ggx, ggw, ggb = torch.autograd.grad(
+                y2, (x2, bn2.weight, bn2.bias), create_graph=True
+            )
+            return float(
+                ggx.detach().float().sum()
+                + ggw.detach().float().sum()
+                + ggb.detach().float().sum()
+            )
+
+        return result, thunk
+
+    if op == "create_graph_max_pool2d":
+        batch = max(min(n, 3), 2)
+        spatial = max(min(n, 6), 4)
+        x = seeded_uniform((batch, 2, spatial, spatial), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        out = F.max_pool2d(x, kernel_size=2, stride=2)
+        y = (out * out).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        result = g
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((batch, 2, spatial, spatial), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            out2 = F.max_pool2d(x2, kernel_size=2, stride=2)
+            y2 = (out2 * out2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            return gg
+
+        return result, thunk
+
+    if op == "create_graph_avg_pool2d":
+        batch = max(min(n, 3), 2)
+        spatial = max(min(n, 6), 4)
+        x = seeded_uniform((batch, 2, spatial, spatial), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        out = F.avg_pool2d(x, kernel_size=2, stride=2)
+        y = (out * out).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        result = g
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((batch, 2, spatial, spatial), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            out2 = F.avg_pool2d(x2, kernel_size=2, stride=2)
+            y2 = (out2 * out2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            return gg
+
+        return result, thunk
+
+    if op == "create_graph_adaptive_avg_pool2d":
+        batch = max(min(n, 3), 2)
+        spatial = max(min(n, 6), 4)
+        x = seeded_uniform((batch, 2, spatial, spatial), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        out = F.adaptive_avg_pool2d(x, (2, 2))
+        y = (out * out).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        result = g
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((batch, 2, spatial, spatial), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            out2 = F.adaptive_avg_pool2d(x2, (2, 2))
+            y2 = (out2 * out2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            return gg
+
+        return result, thunk
+
+    if op == "create_graph_cross_entropy":
+        batch = max(min(n, 8), 4)
+        classes = 5
+        logits = seeded_uniform((batch, classes), seed, -1.0, 1.0)
+        state = seed + 3
+        target_list = []
+        for _ in range(batch):
+            state = (state * 1664525 + 1013904223) & 0xFFFFFFFFFFFFFFFF
+            target_list.append(int((state >> 8) % classes))
+        target = torch.tensor(target_list, dtype=torch.long)
+        logits.requires_grad_(True)
+        y = F.cross_entropy(logits, target)
+        (g,) = torch.autograd.grad(y, logits, create_graph=True)
+        result = g
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((batch, classes), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            y2 = F.cross_entropy(x2, target)
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            return gg
+
+        return result, thunk
+
+    if op == "create_graph_narrow":
+        rows = max(min(n, 8), 4)
+        cols = 6
+        x = seeded_uniform((rows, cols), seed, -1.0, 1.0)
+        x.requires_grad_(True)
+        out = torch.narrow(x, 1, 1, 3)
+        y = (out * out).sum()
+        (g,) = torch.autograd.grad(y, x, create_graph=True)
+        result = g
+
+        def thunk() -> torch.Tensor:
+            x2 = seeded_uniform((rows, cols), seed, -1.0, 1.0)
+            x2.requires_grad_(True)
+            out2 = torch.narrow(x2, 1, 1, 3)
+            y2 = (out2 * out2).sum()
+            (gg,) = torch.autograd.grad(y2, x2, create_graph=True)
+            return gg
+
+        return result, thunk
+
+    if op == "nested_to_padded":
+        nbat = max(min(n, 6), 3)
+        parts = []
+        for i in range(nbat):
+            length = (i % 3) + 1
+            parts.append(seeded_uniform((length,), seed + i, -1.0, 1.0))
+        nt = torch.nested.nested_tensor(parts)
+        result = torch.nested.to_padded_tensor(nt, 0.0)
+
+        def thunk() -> torch.Tensor:
+            parts2 = [
+                seeded_uniform(((i % 3) + 1,), seed + i, -1.0, 1.0) for i in range(nbat)
+            ]
+            nt2 = torch.nested.nested_tensor(parts2)
+            return torch.nested.to_padded_tensor(nt2, 0.0)
+
+        return result, thunk
+
+    if op == "device_cuda":
+        d = torch.device("cuda")
+        assert d.type == "cuda"
+        result = 1.0
+
+        def thunk() -> float:
+            return 1.0
+
+        return result, thunk
+
+    if op == "fused_linear_relu":
+        batch = max(min(n, 16), 4)
+        in_f, out_f = 8, 6
+        x = seeded_uniform((batch, in_f), seed, -1.0, 1.0)
+        w = seeded_uniform((out_f, in_f), seed + 1, -0.2, 0.2)
+        b = seeded_uniform((out_f,), seed + 2, -0.1, 0.1)
+        result = F.relu(F.linear(x, w, b))
+
+        def thunk() -> torch.Tensor:
+            return F.relu(F.linear(x, w, b))
+
+        return result, thunk
+
+    if op == "grad_scaler_step":
+        batch = max(min(n, 16), 4)
+        in_f, out_f = 4, 3
+        x = seeded_uniform((batch, in_f), seed, -1.0, 1.0)
+        target = seeded_uniform((batch, out_f), seed + 1, -0.5, 0.5)
+        layer = make_linear(in_f, out_f, seed + 10)
+        opt = torch.optim.SGD(layer.parameters(), lr=0.05)
+        try:
+            scaler = torch.amp.GradScaler(
+                "cpu", enabled=True, init_scale=8.0, growth_interval=2000
+            )
+        except (TypeError, AttributeError):
+            scaler = torch.cuda.amp.GradScaler(
+                init_scale=8.0, growth_interval=2000, enabled=True
+            )
+        for _ in range(3):
+            opt.zero_grad(set_to_none=False)
+            y = layer(x)
+            loss = ((y - target) ** 2).mean()
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+        result = float(layer(x).detach().float().sum() + float(scaler.get_scale()))
+
+        def thunk() -> float:
+            layer2 = make_linear(in_f, out_f, seed + 10)
+            opt2 = torch.optim.SGD(layer2.parameters(), lr=0.05)
+            try:
+                scaler2 = torch.amp.GradScaler(
+                    "cpu", enabled=True, init_scale=8.0, growth_interval=2000
+                )
+            except (TypeError, AttributeError):
+                scaler2 = torch.cuda.amp.GradScaler(
+                    init_scale=8.0, growth_interval=2000, enabled=True
+                )
+            for _ in range(3):
+                opt2.zero_grad(set_to_none=False)
+                y2 = layer2(x)
+                loss2 = ((y2 - target) ** 2).mean()
+                scaler2.scale(loss2).backward()
+                scaler2.step(opt2)
+                scaler2.update()
+            return float(layer2(x).detach().float().sum() + float(scaler2.get_scale()))
+
+        return result, thunk
+
     raise ValueError(f"unknown op: {op}")
 
 
@@ -952,6 +1835,21 @@ def dataloader_once(n: int, seed: int) -> float:
     features = seeded_uniform((n, 4), seed, -1.0, 1.0)
     labels = seeded_uniform((n, 1), seed + 1, -1.0, 1.0)
     order = _fisher_yates(n, seed + 9)
+    batch_size = 8
+    acc = 0.0
+    for start in range(0, n, batch_size):
+        batch_idx = order[start : start + batch_size]
+        index = torch.tensor(batch_idx, dtype=torch.long)
+        xb = features.index_select(0, index)
+        yb = labels.index_select(0, index)
+        acc += checksum(xb) + checksum(yb)
+    return acc
+
+
+def dataloader_sequential_once(n: int, seed: int) -> float:
+    features = seeded_uniform((n, 4), seed, -1.0, 1.0)
+    labels = seeded_uniform((n, 1), seed + 1, -1.0, 1.0)
+    order = list(range(n))
     batch_size = 8
     acc = 0.0
     for start in range(0, n, batch_size):

@@ -1,6 +1,6 @@
-//! `torch.utils.data` — TensorDataset + DataLoader (CPU, local/`std`).
+//! `torch.utils.data` — TensorDataset + DataLoader + samplers (CPU, local/`std`).
 
-use crate::ops::index_select;
+use crate::ops::{select, stack};
 use crate::tensor::Tensor;
 
 /// `torch.utils.data.TensorDataset(features, labels)`.
@@ -39,7 +39,47 @@ fn fisher_yates(n: usize, seed: u64) -> Vec<usize> {
     idx
 }
 
-/// `torch.utils.data.DataLoader` — fixed-order or LCG-shuffled batches.
+/// `torch.utils.data.SequentialSampler` — indices `0..len`.
+pub struct SequentialSampler {
+    pub len: usize,
+}
+
+impl SequentialSampler {
+    pub fn new(len: usize) -> Self {
+        Self { len }
+    }
+
+    pub fn indices(&self) -> Vec<usize> {
+        (0..self.len).collect()
+    }
+}
+
+/// `torch.utils.data.RandomSampler` — LCG Fisher–Yates permutation (replacement=False).
+pub struct RandomSampler {
+    pub len: usize,
+    pub seed: u64,
+}
+
+impl RandomSampler {
+    pub fn new(len: usize, seed: u64) -> Self {
+        Self { len, seed }
+    }
+
+    pub fn indices(&self) -> Vec<usize> {
+        fisher_yates(self.len, self.seed)
+    }
+}
+
+/// `torch.utils.data.default_collate` for a list of `(features, labels)` samples —
+/// stacks on dim 0.
+pub fn default_collate(batch: &[(Tensor, Tensor)]) -> (Tensor, Tensor) {
+    assert!(!batch.is_empty(), "default_collate: empty batch");
+    let xs: Vec<&Tensor> = batch.iter().map(|(x, _)| x).collect();
+    let ys: Vec<&Tensor> = batch.iter().map(|(_, y)| y).collect();
+    (stack(&xs, 0), stack(&ys, 0))
+}
+
+/// `torch.utils.data.DataLoader` — batches over sampler indices.
 pub struct DataLoader {
     features: Tensor,
     labels: Tensor,
@@ -50,13 +90,32 @@ pub struct DataLoader {
 
 impl DataLoader {
     pub fn new(dataset: &TensorDataset, batch_size: usize, shuffle: bool, seed: u64) -> Self {
-        assert!(batch_size > 0);
-        let n = dataset.len();
         let indices = if shuffle {
-            fisher_yates(n, seed)
+            RandomSampler::new(dataset.len(), seed).indices()
         } else {
-            (0..n).collect()
+            SequentialSampler::new(dataset.len()).indices()
         };
+        Self::from_indices(dataset, batch_size, indices)
+    }
+
+    pub fn from_sequential(dataset: &TensorDataset, batch_size: usize) -> Self {
+        Self::from_indices(
+            dataset,
+            batch_size,
+            SequentialSampler::new(dataset.len()).indices(),
+        )
+    }
+
+    pub fn from_random(dataset: &TensorDataset, batch_size: usize, seed: u64) -> Self {
+        Self::from_indices(
+            dataset,
+            batch_size,
+            RandomSampler::new(dataset.len(), seed).indices(),
+        )
+    }
+
+    pub fn from_indices(dataset: &TensorDataset, batch_size: usize, indices: Vec<usize>) -> Self {
+        assert!(batch_size > 0);
         Self {
             features: dataset.features.clone(),
             labels: dataset.labels.clone(),
@@ -78,9 +137,14 @@ impl DataLoader {
         let end = (self.pos + self.batch_size).min(self.indices.len());
         let batch_idx = &self.indices[self.pos..end];
         self.pos = end;
-        let xb = index_select(&self.features, 0, batch_idx);
-        let yb = index_select(&self.labels, 0, batch_idx);
-        Some((xb, yb))
+        // Gather samples then `default_collate` (stack on dim 0).
+        let mut samples = Vec::with_capacity(batch_idx.len());
+        for &i in batch_idx {
+            let x = select(&self.features, 0, i);
+            let y = select(&self.labels, 0, i);
+            samples.push((x, y));
+        }
+        Some(default_collate(&samples))
     }
 
     /// Sum of checksums over one epoch (features + labels per batch).
@@ -91,5 +155,30 @@ impl DataLoader {
             acc += x.checksum() + y.checksum();
         }
         acc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::seeded_uniform;
+
+    #[test]
+    fn sequential_vs_random() {
+        let n = 16;
+        let ds = TensorDataset::new(
+            seeded_uniform(&[n, 3], 1, -1.0, 1.0),
+            seeded_uniform(&[n, 1], 2, -1.0, 1.0),
+        );
+        let seq = SequentialSampler::new(n).indices();
+        assert_eq!(seq, (0..n).collect::<Vec<_>>());
+        let rnd = RandomSampler::new(n, 99).indices();
+        assert_eq!(rnd.len(), n);
+        assert_ne!(rnd, seq);
+        let mut a = DataLoader::from_sequential(&ds, 4);
+        let mut b = DataLoader::from_random(&ds, 4, 99);
+        let (xa, _) = a.next_batch().unwrap();
+        let (xb, _) = b.next_batch().unwrap();
+        assert!((xa.checksum() - xb.checksum()).abs() > 1e-6);
     }
 }

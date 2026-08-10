@@ -2,6 +2,8 @@
 
 use crate::autograd::GradFn;
 use crate::context::is_grad_enabled;
+use crate::device::Device;
+use crate::dtype::Dtype;
 use crate::nn::Module;
 use crate::ops::randn;
 use crate::tensor::{Tensor, TensorInner};
@@ -28,7 +30,7 @@ impl Conv2d {
         let w = randn(&[out_channels, in_channels, kernel_size, kernel_size], seed, true);
         {
             let mut inner = w.inner.borrow_mut();
-            for v in inner.data.iter_mut() {
+            for v in inner.data_mut_dense().iter_mut() {
                 *v *= scale;
             }
         }
@@ -36,7 +38,7 @@ impl Conv2d {
             let bb = randn(&[out_channels], seed + 1, true);
             {
                 let mut inner = bb.inner.borrow_mut();
-                for v in inner.data.iter_mut() {
+                for v in inner.data_mut_dense().iter_mut() {
                     *v *= scale;
                 }
             }
@@ -78,6 +80,8 @@ pub fn conv2d_forward(
 ) -> Tensor {
     let xi = input.inner.borrow();
     let wi = weight.inner.borrow();
+    let xd = xi.dense_data();
+    let wd = wi.dense_data();
     assert_eq!(xi.shape.len(), 4, "conv2d input NCHW");
     assert_eq!(wi.shape.len(), 4, "conv2d weight OIHW");
     let (n, cin, h, w) = (xi.shape[0], xi.shape[1], xi.shape[2], xi.shape[3]);
@@ -87,6 +91,7 @@ pub fn conv2d_forward(
     let oh = h - kh + 1;
     let ow = w - kw + 1;
     let mut data = vec![0.0f32; n * cout * oh * ow];
+    let bias_d = bias.map(|b| b.data());
     for ni in 0..n {
         for oc in 0..cout {
             for oy in 0..oh {
@@ -95,16 +100,14 @@ pub fn conv2d_forward(
                     for ic in 0..cin {
                         for ky in 0..kh {
                             for kx in 0..kw {
-                                let iv = xi.data
-                                    [((ni * cin + ic) * h + (oy + ky)) * w + (ox + kx)];
-                                let wv = wi.data
-                                    [((oc * cin + ic) * kh + ky) * kw + kx];
+                                let iv = xd[((ni * cin + ic) * h + (oy + ky)) * w + (ox + kx)];
+                                let wv = wd[((oc * cin + ic) * kh + ky) * kw + kx];
                                 acc += iv * wv;
                             }
                         }
                     }
-                    if let Some(b) = bias {
-                        acc += b.inner.borrow().data[oc];
+                    if let Some(ref bd) = bias_d {
+                        acc += bd[oc];
                     }
                     data[((ni * cout + oc) * oh + oy) * ow + ox] = acc;
                 }
@@ -127,13 +130,15 @@ pub fn conv2d_forward(
     };
     let shape = vec![n, cout, oh, ow];
     let numel = n * cout * oh * ow;
-    Tensor::from_inner(TensorInner {
+    Tensor::from_inner(TensorInner::new_contiguous(
         data,
         shape,
-        requires_grad: rg,
-        grad: if rg { Some(vec![0.0; numel]) } else { None },
-        grad_fn: gf,
-    })
+        Device::Cpu,
+        Dtype::Float32,
+        rg,
+        if rg { Some(vec![0.0; numel]) } else { None },
+        gf,
+    ))
 }
 
 impl Module for Conv2d {

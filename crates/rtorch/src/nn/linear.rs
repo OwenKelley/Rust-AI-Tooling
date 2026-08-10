@@ -18,7 +18,7 @@ impl Linear {
         let w = randn(&[out_features, in_features], seed, true);
         {
             let mut inner = w.inner.borrow_mut();
-            for v in inner.data.iter_mut() {
+            for v in inner.data_mut_dense().iter_mut() {
                 *v *= scale;
             }
         }
@@ -26,7 +26,7 @@ impl Linear {
             let bb = randn(&[out_features], seed + 1, true);
             {
                 let mut inner = bb.inner.borrow_mut();
-                for v in inner.data.iter_mut() {
+                for v in inner.data_mut_dense().iter_mut() {
                     *v *= scale;
                 }
             }

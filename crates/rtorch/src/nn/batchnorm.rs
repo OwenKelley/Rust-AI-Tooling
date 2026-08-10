@@ -2,6 +2,8 @@
 
 use crate::autograd::GradFn;
 use crate::context::is_grad_enabled;
+use crate::device::Device;
+use crate::dtype::Dtype;
 use crate::nn::Module;
 use crate::ops::{ones, zeros};
 use crate::tensor::{Tensor, TensorInner};
@@ -65,22 +67,25 @@ impl Module for BatchNorm1d {
         let c = self.num_features;
         assert_eq!(input.shape()[1], c);
         let xi = input.inner.borrow();
+        let xd = xi.dense_data();
         let n = xi.shape[0];
         let w = self.weight.inner.borrow();
         let b = self.bias.inner.borrow();
+        let wd = w.dense_data();
+        let bd = b.dense_data();
         let mut mean = vec![0.0f32; c];
         let mut rstd = vec![0.0f32; c];
         if self.training {
             for j in 0..c {
                 let mut m = 0.0f32;
                 for i in 0..n {
-                    m += xi.data[i * c + j];
+                    m += xd[i * c + j];
                 }
                 m /= n as f32;
                 mean[j] = m;
                 let mut var = 0.0f32;
                 for i in 0..n {
-                    let d = xi.data[i * c + j] - m;
+                    let d = xd[i * c + j] - m;
                     var += d * d;
                 }
                 var /= n as f32;
@@ -98,7 +103,7 @@ impl Module for BatchNorm1d {
             for j in 0..c {
                 let mut var = 0.0f32;
                 for i in 0..n {
-                    let d = xi.data[i * c + j] - mean[j];
+                    let d = xd[i * c + j] - mean[j];
                     var += d * d;
                 }
                 var = var / n as f32 * unbias;
@@ -116,8 +121,8 @@ impl Module for BatchNorm1d {
         let mut data = vec![0.0f32; n * c];
         for i in 0..n {
             for j in 0..c {
-                let xhat = (xi.data[i * c + j] - mean[j]) * rstd[j];
-                data[i * c + j] = xhat * w.data[j] + b.data[j];
+                let xhat = (xd[i * c + j] - mean[j]) * rstd[j];
+                data[i * c + j] = xhat * wd[j] + bd[j];
             }
         }
         drop((xi, w, b));
@@ -134,17 +139,19 @@ impl Module for BatchNorm1d {
         } else {
             None
         };
-        Tensor::from_inner(TensorInner {
-            data,
-            shape: vec![n, c],
-            requires_grad: rg,
-            grad: if rg {
+        Tensor::from_inner(TensorInner::new_contiguous(
+        data,
+        vec![n, c],
+        Device::Cpu,
+        Dtype::Float32,
+        rg,
+        if rg {
                 Some(vec![0.0; n * c])
             } else {
                 None
             },
-            grad_fn: gf,
-        })
+        gf,
+    ))
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -222,7 +229,7 @@ impl Module for BatchNorm2d {
                 for ni in 0..n {
                     for y in 0..h {
                         for x in 0..w {
-                            s += xi.data[((ni * c + j) * h + y) * w + x];
+                            s += xi.dense_data()[((ni * c + j) * h + y) * w + x];
                         }
                     }
                 }
@@ -231,7 +238,7 @@ impl Module for BatchNorm2d {
                 for ni in 0..n {
                     for y in 0..h {
                         for x in 0..w {
-                            let v = xi.data[((ni * c + j) * h + y) * w + x] - mean[j];
+                            let v = xi.dense_data()[((ni * c + j) * h + y) * w + x] - mean[j];
                             var += v * v;
                         }
                     }
@@ -252,7 +259,7 @@ impl Module for BatchNorm2d {
                 for ni in 0..n {
                     for y in 0..h {
                         for x in 0..w {
-                            let v = xi.data[((ni * c + j) * h + y) * w + x] - mean[j];
+                            let v = xi.dense_data()[((ni * c + j) * h + y) * w + x] - mean[j];
                             var += v * v;
                         }
                     }
@@ -275,8 +282,8 @@ impl Module for BatchNorm2d {
                 for y in 0..h {
                     for x in 0..w {
                         let ii = ((ni * c + j) * h + y) * w + x;
-                        let xhat = (xi.data[ii] - mean[j]) * rstd[j];
-                        data[ii] = xhat * wt.data[j] + b.data[j];
+                        let xhat = (xi.dense_data()[ii] - mean[j]) * rstd[j];
+                        data[ii] = xhat * wt.dense_data()[j] + b.dense_data()[j];
                     }
                 }
             }
@@ -296,13 +303,15 @@ impl Module for BatchNorm2d {
             None
         };
         let numel = n * c * h * w;
-        Tensor::from_inner(TensorInner {
-            data,
-            shape: vec![n, c, h, w],
-            requires_grad: rg,
-            grad: if rg { Some(vec![0.0; numel]) } else { None },
-            grad_fn: gf,
-        })
+        Tensor::from_inner(TensorInner::new_contiguous(
+        data,
+        vec![n, c, h, w],
+        Device::Cpu,
+        Dtype::Float32,
+        rg,
+        if rg { Some(vec![0.0; numel]) } else { None },
+        gf,
+    ))
     }
 
     fn parameters(&self) -> Vec<Tensor> {

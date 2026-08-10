@@ -25,7 +25,7 @@ pub fn load_state_dict(named: &[(&str, &Tensor)], sd: &StateDict) {
             data.len(),
             "load_state_dict: size mismatch for '{name}'"
         );
-        t.inner.borrow_mut().data.copy_from_slice(data);
+        t.inner.borrow_mut().data_mut_dense().copy_from_slice(data);
     }
 }
 

@@ -8,13 +8,14 @@ use std::time::Instant;
 
 use rnumpy::{seeded_uniform, NdArray};
 use rscipy::{
-    blackman, cholesky, convolve, correlate, csr_add, csr_frobenius_norm, csr_from_threshold,
-    csr_matmat, csr_matvec, csr_to_csc, csr_to_dense, csr_transpose, cumulative_trapezoid, detrend,
-    entropy, erf, erfc, expit, expm, eye_csr, fft, fftconvolve, fftfreq, gamma, gammaln, hamming,
-    hann, i0, ifft, irfft, kurtosis, least_squares, logit, logsumexp, lstsq, lu, lu_factor,
-    minimize_lbfgsb, minimize_nelder_mead, ndtr, ndtri, norm, norm_cdf, norm_ord, norm_pdf,
-    norm_ppf, pearsonr, quad, rankdata, rfft, sem, simpson, skew, softmax, solve_ivp_rk45,
-    solve_triangular, spearmanr, trapezoid, ttest_ind, zscore, NormOrd,
+    blackman, cg, cholesky, convolve, correlate, csr_add, csr_frobenius_norm, csr_from_dense,
+    csr_from_threshold, csr_matmat, csr_matvec, csr_to_csc, csr_to_dense, csr_transpose,
+    cumulative_trapezoid, detrend, entropy, erf, erfc, expit, expm, eye_csr, fft, fftconvolve,
+    fftfreq, gamma, gammaln, hamming, hann, i0, ifft, irfft, kurtosis, least_squares, logit,
+    logsumexp, lstsq, lu, lu_factor, minimize_lbfgsb, minimize_nelder_mead, ndtr, ndtri, norm,
+    norm_cdf, norm_ord, norm_pdf, norm_ppf, pearsonr, quad, rankdata, rfft, sem, simpson, skew,
+    softmax, solve_ivp_rk45, solve_triangular, spearmanr, spsolve, trapezoid, ttest_ind, zscore,
+    NormOrd,
 };
 
 #[derive(Debug, Clone)]
@@ -62,6 +63,8 @@ enum Op {
     CsrEye,
     CsrNorm,
     CsrToCsc,
+    Spsolve,
+    Cg,
     Fft,
     Ifft,
     Rfft,
@@ -127,6 +130,8 @@ impl Op {
             "csr_eye" => Self::CsrEye,
             "csr_norm" => Self::CsrNorm,
             "csr_to_csc" => Self::CsrToCsc,
+            "spsolve" => Self::Spsolve,
+            "cg" => Self::Cg,
             "fft" => Self::Fft,
             "ifft" => Self::Ifft,
             "rfft" => Self::Rfft,
@@ -193,6 +198,8 @@ impl Op {
             Self::CsrEye => "csr_eye",
             Self::CsrNorm => "csr_norm",
             Self::CsrToCsc => "csr_to_csc",
+            Self::Spsolve => "spsolve",
+            Self::Cg => "cg",
             Self::Fft => "fft",
             Self::Ifft => "ifft",
             Self::Rfft => "rfft",
@@ -898,6 +905,41 @@ fn run_op(op: &Op, size: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(csr_to_csc(&csr));
+                }),
+            )
+        }
+        Op::Spsolve => {
+            let mut a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            for i in 0..n {
+                a[[i, i]] += (n as f64) + 1.0;
+            }
+            let csr = csr_from_dense(&a);
+            let b = seeded_uniform(&[n], seed + 1, -1.0, 1.0);
+            let checksum = checksum_array(&spsolve(&csr, &b));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(spsolve(&csr, &b));
+                }),
+            )
+        }
+        Op::Cg => {
+            let mut a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            for i in 0..n {
+                for j in 0..i {
+                    let v = 0.5 * (a[[i, j]] + a[[j, i]]);
+                    a[[i, j]] = v;
+                    a[[j, i]] = v;
+                }
+                a[[i, i]] += (n as f64) + 1.0;
+            }
+            let csr = csr_from_dense(&a);
+            let b = seeded_uniform(&[n], seed + 1, -1.0, 1.0);
+            let checksum = checksum_array(&cg(&csr, &b, 1e-10, Some(n * 20)));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(cg(&csr, &b, 1e-10, Some(n * 20)));
                 }),
             )
         }

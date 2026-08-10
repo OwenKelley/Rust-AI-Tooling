@@ -532,6 +532,65 @@ pub fn csr_from_threshold(a: &NdArray, thresh: f64) -> CsrMatrix {
     }
 }
 
+fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+/// `scipy.sparse.linalg.spsolve(A, b)` for square CSR `A`.
+///
+/// v1: densifies then uses `rnumpy::solve` (correct for modest `n`).
+pub fn spsolve(a: &CsrMatrix, b: &NdArray) -> NdArray {
+    assert_eq!(a.nrows, a.ncols, "spsolve: square matrix required");
+    assert_eq!(b.ndim(), 1, "spsolve: 1D rhs for v1");
+    assert_eq!(b.len(), a.nrows, "spsolve: rhs length mismatch");
+    let dense = csr_to_dense(a);
+    rnumpy::solve(&dense, b)
+}
+
+/// `scipy.sparse.linalg.cg(A, b, rtol=tol)` — conjugate gradient for SPD CSR.
+///
+/// Returns the approximate solution (no convergence info object yet).
+pub fn cg(a: &CsrMatrix, b: &NdArray, tol: f64, maxiter: Option<usize>) -> NdArray {
+    assert_eq!(a.nrows, a.ncols, "cg: square matrix required");
+    assert_eq!(b.ndim(), 1, "cg: expected 1D rhs");
+    assert_eq!(b.len(), a.nrows, "cg: rhs length mismatch");
+    let n = a.nrows;
+    let maxiter = maxiter.unwrap_or(n.saturating_mul(10).max(1));
+    let bc = b.to_contiguous();
+    let b_s = bc.as_slice().unwrap();
+
+    let mut x = vec![0.0; n];
+    let mut r = b_s.to_vec();
+    let mut p = r.clone();
+    let mut rsold = dot_f64(&r, &r);
+    let bnorm = rsold.sqrt().max(1.0);
+
+    for _ in 0..maxiter {
+        if rsold.sqrt() <= tol * bnorm {
+            break;
+        }
+        let ap = csr_matvec(a, &NdArray::from_vec(p.clone()));
+        let ap_s = ap.as_slice().unwrap();
+        let pap = dot_f64(&p, ap_s);
+        assert!(pap.abs() > 0.0, "cg: breakdown (pᵀAp = 0)");
+        let alpha = rsold / pap;
+        for i in 0..n {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * ap_s[i];
+        }
+        let rsnew = dot_f64(&r, &r);
+        if rsnew.sqrt() <= tol * bnorm {
+            break;
+        }
+        let beta = rsnew / rsold;
+        for i in 0..n {
+            p[i] = r[i] + beta * p[i];
+        }
+        rsold = rsnew;
+    }
+    NdArray::from_vec(x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,6 +599,19 @@ mod tests {
     fn assert_close(a: f64, b: f64, eps: f64) {
         let d = (a - b).abs();
         assert!(d <= eps, "|{a} - {b}| = {d} > {eps}");
+    }
+
+    fn spd_dense(n: usize, seed: u64) -> NdArray {
+        let mut m = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+        for i in 0..n {
+            for j in 0..i {
+                let v = 0.5 * (m[[i, j]] + m[[j, i]]);
+                m[[i, j]] = v;
+                m[[j, i]] = v;
+            }
+            m[[i, i]] += (n as f64) + 1.0;
+        }
+        m
     }
 
     #[test]
@@ -589,5 +661,25 @@ mod tests {
         assert!(Arc::ptr_eq(&a.data, &at.data));
         assert!(Arc::ptr_eq(&a.indices, &at.indices));
         assert!(Arc::ptr_eq(&a.indptr, &at.indptr));
+    }
+
+    #[test]
+    fn spsolve_identity() {
+        let a = eye_csr(4);
+        let b = NdArray::from_vec(vec![1.0, 2.0, 3.0, 4.0]);
+        let x = spsolve(&a, &b);
+        assert_eq!(x.as_slice().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn cg_spd() {
+        let dense = spd_dense(6, 3);
+        let csr = csr_from_dense(&dense);
+        let b = seeded_uniform(&[6], 4, -1.0, 1.0);
+        let x = cg(&csr, &b, 1e-10, Some(200));
+        let ax = csr_matvec(&csr, &x);
+        for i in 0..6 {
+            assert_close(ax[i], b[i], 1e-6);
+        }
     }
 }

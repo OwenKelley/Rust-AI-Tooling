@@ -6,4 +6,5 @@ license.workspace = true
 description = "PyTorch-like tensor + autograd API for Rust (1:1 mapping target)"
 
 [dependencies]
-# Local only — no third-party tensor/autograd crates.
+rnumpy = { path = "../rnumpy" }
+rpandas = { path = "../rpandas" }

@@ -2,6 +2,8 @@
 
 use crate::autograd::GradFn;
 use crate::context::is_grad_enabled;
+use crate::device::Device;
+use crate::dtype::Dtype;
 use crate::nn::Module;
 use crate::ops::randn;
 use crate::tensor::{Tensor, TensorInner};
@@ -17,7 +19,7 @@ impl Embedding {
         {
             let mut inner = w.inner.borrow_mut();
             let scale = (1.0 / embedding_dim as f32).sqrt();
-            for v in inner.data.iter_mut() {
+            for v in inner.data_mut_dense().iter_mut() {
                 *v *= scale;
             }
         }
@@ -38,7 +40,7 @@ impl Embedding {
         let mut data = vec![0.0f32; n * dim];
         for (i, &idx) in indices.iter().enumerate() {
             assert!(idx < num_emb, "Embedding: index {idx} >= {num_emb}");
-            let src = &w.data[idx * dim..(idx + 1) * dim];
+            let src = &w.dense_data()[idx * dim..(idx + 1) * dim];
             data[i * dim..(i + 1) * dim].copy_from_slice(src);
         }
         drop(w);
@@ -53,13 +55,15 @@ impl Embedding {
         };
         let shape = vec![n, dim];
         let numel = n * dim;
-        Tensor::from_inner(TensorInner {
-            data,
-            shape,
-            requires_grad: rg,
-            grad: if rg { Some(vec![0.0; numel]) } else { None },
-            grad_fn: gf,
-        })
+        Tensor::from_inner(TensorInner::new_contiguous(
+        data,
+        shape,
+        Device::Cpu,
+        Dtype::Float32,
+        rg,
+        if rg { Some(vec![0.0; numel]) } else { None },
+        gf,
+    ))
     }
 }
 

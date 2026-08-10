@@ -12,13 +12,14 @@ use std::process;
 use std::time::Instant;
 
 use rnumpy::{
-    abs, add, arange, argmax, argmin, broadcast_to, ceil, clip, compress, concatenate, cos, cumprod,
-    cumsum, cumsum_axis, det, divide, dot, eigvalsh, equal, exp, eye, floor, full, greater, inv,
-    less, linspace, log, matmul, max, max_axis, maximum, mean, mean_axis, min, min_axis, minimum,
-    moveaxis, multiply, negative, norm, not_equal, ones, power, qr, ravel, reciprocal, reshape,
-    reshape_infer, round, seeded_uniform, sign, sin, slice_array, solve, sqrt, square, stack,
-    std as np_std, subtract, sum, sum_axis, svdvals, swapaxes, take, tan, tanh, trace, transpose,
-    trunc, var, where_, zeros, AxisSlice, NdArray,
+    abs, add, arange, argmax, argmin, boolean_index, broadcast_to, ceil, clip, compress,
+    concatenate, cos, cumprod, cumsum, cumsum_axis, det, divide, dot, eig, eigvals, eigvalsh, equal,
+    exp, eye, fancy_index_2d, floor, full, greater, inv, less, linspace, log, matmul, max, max_axis,
+    maximum, mean, mean_axis, min, min_axis, minimum, moveaxis, multiply, negative, norm, not_equal,
+    ones, power, qr, ravel, reciprocal, reshape, reshape_infer, round, seeded_uniform, sign, sin,
+    slice_array, solve, sqrt, square, stack, std as np_std, subtract, sum, sum_axis, svd, svdvals,
+    swapaxes, take, take_along_axis, tan, tanh, trace, transpose, trunc, var, where_, zeros,
+    AxisSlice, NdArray,
 };
 
 #[derive(Debug, Clone)]
@@ -91,10 +92,16 @@ enum Op {
     Inv,
     Det,
     Qr,
+    Svd,
     Svdvals,
     Eigvalsh,
+    Eigvals,
+    Eig,
     Take,
     Compress,
+    BooleanIndex,
+    FancyIndex2d,
+    TakeAlongAxis,
     Slice,
     AstypeF32,
 }
@@ -170,10 +177,16 @@ impl Op {
             "inv" => Self::Inv,
             "det" => Self::Det,
             "qr" => Self::Qr,
+            "svd" => Self::Svd,
             "svdvals" => Self::Svdvals,
             "eigvalsh" => Self::Eigvalsh,
+            "eigvals" => Self::Eigvals,
+            "eig" => Self::Eig,
             "take" => Self::Take,
             "compress" => Self::Compress,
+            "boolean_index" => Self::BooleanIndex,
+            "fancy_index_2d" => Self::FancyIndex2d,
+            "take_along_axis" => Self::TakeAlongAxis,
             "slice" => Self::Slice,
             "astype_f32" => Self::AstypeF32,
             other => {
@@ -254,10 +267,16 @@ impl Op {
             Self::Inv => "inv",
             Self::Det => "det",
             Self::Qr => "qr",
+            Self::Svd => "svd",
             Self::Svdvals => "svdvals",
             Self::Eigvalsh => "eigvalsh",
+            Self::Eigvals => "eigvals",
+            Self::Eig => "eig",
             Self::Take => "take",
             Self::Compress => "compress",
+            Self::BooleanIndex => "boolean_index",
+            Self::FancyIndex2d => "fancy_index_2d",
+            Self::TakeAlongAxis => "take_along_axis",
             Self::Slice => "slice",
             Self::AstypeF32 => "astype_f32",
         }
@@ -1154,6 +1173,36 @@ fn run_op(op: &Op, size: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 }),
             )
         }
+        Op::Svd => {
+            let a = seeded_uniform(&[n, n / 2 + 1], seed, -1.0, 1.0);
+            let (u, s, vh) = svd(&a);
+            let k = s.len();
+            let m = u.shape()[0];
+            let us_data: Vec<f64> = (0..m * k)
+                .map(|idx| {
+                    let r = idx / k;
+                    let c = idx % k;
+                    u[[r, c]] * s[c]
+                })
+                .collect();
+            let checksum = checksum_array(&matmul(&NdArray::from_shape_vec(&[m, k], us_data), &vh));
+            (
+                checksum,
+                Box::new(move || {
+                    let (u, s, vh) = svd(&a);
+                    let k = s.len();
+                    let m = u.shape()[0];
+                    let us_data: Vec<f64> = (0..m * k)
+                        .map(|idx| {
+                            let r = idx / k;
+                            let c = idx % k;
+                            u[[r, c]] * s[c]
+                        })
+                        .collect();
+                    std::hint::black_box(matmul(&NdArray::from_shape_vec(&[m, k], us_data), &vh));
+                }),
+            )
+        }
         Op::Svdvals => {
             let a = seeded_uniform(&[n, n / 2 + 1], seed, -1.0, 1.0);
             let checksum = checksum_array(&svdvals(&a));
@@ -1171,6 +1220,77 @@ fn run_op(op: &Op, size: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(eigvalsh(&a));
+                }),
+            )
+        }
+        Op::Eigvals => {
+            // Full QR Schur is O(n⁴)-ish; keep parity matrices modest.
+            let m = n.min(16);
+            let a = seeded_uniform(&[m, m], seed, -1.0, 1.0);
+            let (wr, wi) = eigvals(&a);
+            let wr = wr.as_slice().unwrap().to_vec();
+            let wi = wi.as_slice().unwrap().to_vec();
+            let mut idx: Vec<usize> = (0..wr.len()).collect();
+            idx.sort_by(|&i, &j| wr[i].total_cmp(&wr[j]).then_with(|| wi[i].total_cmp(&wi[j])));
+            let mut packed = Vec::with_capacity(2 * wr.len());
+            for &i in &idx {
+                packed.push(wr[i]);
+            }
+            for &i in &idx {
+                packed.push(wi[i]);
+            }
+            let checksum = checksum_array(&NdArray::from_vec(packed));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(eigvals(&a));
+                }),
+            )
+        }
+        Op::Eig => {
+            let m = n.min(8);
+            let a = seeded_uniform(&[m, m], seed, -1.0, 1.0);
+            let ((wr, wi), (vr, vi)) = eig(&a);
+            let wr_s = wr.as_slice().unwrap();
+            let wi_s = wi.as_slice().unwrap();
+            let mut res = 0.0;
+            for k in 0..m {
+                for r in 0..m {
+                    let mut av_r = 0.0;
+                    let mut av_i = 0.0;
+                    for c in 0..m {
+                        av_r += a[[r, c]] * vr[[c, k]];
+                        av_i += a[[r, c]] * vi[[c, k]];
+                    }
+                    let rhs_r = wr_s[k] * vr[[r, k]] - wi_s[k] * vi[[r, k]];
+                    let rhs_i = wr_s[k] * vi[[r, k]] + wi_s[k] * vr[[r, k]];
+                    res += (av_r - rhs_r).abs() + (av_i - rhs_i).abs();
+                }
+            }
+            if res < 1e-4 {
+                res = 0.0;
+            }
+            let wr_v = wr_s.to_vec();
+            let wi_v = wi_s.to_vec();
+            let mut idx: Vec<usize> = (0..m).collect();
+            idx.sort_by(|&i, &j| {
+                wr_v[i]
+                    .total_cmp(&wr_v[j])
+                    .then_with(|| wi_v[i].total_cmp(&wi_v[j]))
+            });
+            let mut packed = Vec::with_capacity(2 * m + 1);
+            for &i in &idx {
+                packed.push(wr_v[i]);
+            }
+            for &i in &idx {
+                packed.push(wi_v[i]);
+            }
+            packed.push(res);
+            let checksum = checksum_array(&NdArray::from_vec(packed));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(eig(&a));
                 }),
             )
         }
@@ -1194,6 +1314,50 @@ fn run_op(op: &Op, size: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(compress(&cond, &a, None));
+                }),
+            )
+        }
+        Op::BooleanIndex => {
+            let a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let mask = greater(&a, &zeros(&[n, n]));
+            let checksum = checksum_array(&boolean_index(&a, &mask));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(boolean_index(&a, &mask));
+                }),
+            )
+        }
+        Op::FancyIndex2d => {
+            let a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let k = (n / 2).max(1);
+            let rows: Vec<usize> = (0..k).map(|i| (i * 3) % n).collect();
+            let cols: Vec<usize> = (0..k).map(|i| (i * 5 + 1) % n).collect();
+            let checksum = checksum_array(&fancy_index_2d(&a, &rows, &cols));
+            let rows2 = rows.clone();
+            let cols2 = cols.clone();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(fancy_index_2d(&a, &rows2, &cols2));
+                }),
+            )
+        }
+        Op::TakeAlongAxis => {
+            let a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            // indices in [0, n) along axis 0, same shape as a
+            let mut idx_data = Vec::with_capacity(n * n);
+            for i in 0..n {
+                for j in 0..n {
+                    idx_data.push(((i * 7 + j * 3) % n) as f64);
+                }
+            }
+            let idx = NdArray::from_shape_vec(&[n, n], idx_data);
+            let checksum = checksum_array(&take_along_axis(&a, &idx, 0));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(take_along_axis(&a, &idx, 0));
                 }),
             )
         }

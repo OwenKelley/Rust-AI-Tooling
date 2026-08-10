@@ -2,6 +2,8 @@
 
 use crate::autograd::GradFn;
 use crate::context::is_grad_enabled;
+use crate::device::Device;
+use crate::dtype::Dtype;
 use crate::ops::{matmul_raw, mean, mul, sub, transpose_data};
 use crate::tensor::{Tensor, TensorInner};
 
@@ -11,17 +13,19 @@ fn wrap(data: Vec<f32>, shape: &[usize], requires_grad: bool, grad_fn: Option<Gr
     } else {
         shape.iter().product()
     };
-    Tensor::from_inner(TensorInner {
+    Tensor::from_inner(TensorInner::new_contiguous(
         data,
-        shape: shape.to_vec(),
+        shape.to_vec(),
+        Device::Cpu,
+        Dtype::Float32,
         requires_grad,
-        grad: if requires_grad {
+        if requires_grad {
             Some(vec![0.0; n])
         } else {
             None
         },
         grad_fn,
-    })
+    ))
 }
 
 /// `F.relu`
@@ -29,10 +33,10 @@ pub fn relu(x: &Tensor) -> Tensor {
     let rg = is_grad_enabled() && x.requires_grad();
     let (data, mask, shape) = {
         let xi = x.inner.borrow();
-        let n = xi.data.len();
+        let n = xi.numel();
         let mut data = vec![0.0f32; n];
         let mut mask = if rg { vec![false; n] } else { Vec::new() };
-        relu_kernel(xi.data.as_slice(), data.as_mut_slice(), if rg { Some(&mut mask) } else { None });
+        relu_kernel(&xi.dense_data(), data.as_mut_slice(), if rg { Some(&mut mask) } else { None });
         (data, mask, xi.shape.clone())
     };
     let gf = if rg {
@@ -51,8 +55,7 @@ pub fn leaky_relu(x: &Tensor, negative_slope: f32) -> Tensor {
     let xi = x.inner.borrow();
     let rg = is_grad_enabled() && x.requires_grad();
     let data: Vec<f32> = xi
-        .data
-        .iter()
+        .dense_data().iter()
         .map(|&v| if v >= 0.0 { v } else { v * negative_slope })
         .collect();
     let shape = xi.shape.clone();
@@ -122,9 +125,9 @@ pub fn sigmoid(x: &Tensor) -> Tensor {
     let rg = is_grad_enabled() && x.requires_grad();
     let (data, shape) = {
         let xi = x.inner.borrow();
-        let n = xi.data.len();
+        let n = xi.numel();
         let mut data = vec![0.0f32; n];
-        sigmoid_kernel(xi.data.as_slice(), data.as_mut_slice());
+        sigmoid_kernel(&xi.dense_data(), data.as_mut_slice());
         (data, xi.shape.clone())
     };
     let gf = if rg {
@@ -273,8 +276,8 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Tensor 
         assert_eq!(bi.shape[0], yi.shape[1]);
         let n = yi.shape[0];
         let out_f = yi.shape[1];
-        let bd = bi.data.as_slice();
-        let yd = yi.data.as_mut_slice();
+        let bd = &bi.dense_data();
+        let yd = &mut *yi.data_mut_dense();
         for i in 0..n {
             let row = &mut yd[i * out_f..(i + 1) * out_f];
             for j in 0..out_f {
@@ -299,6 +302,46 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Tensor 
     y
 }
 
+/// Fused `relu(linear(input, weight, bias))`.
+///
+/// With grads enabled, equivalent to `relu(linear(...))`. With grads disabled,
+/// runs matmul + bias + ReLU without an intermediate Tensor.
+pub fn fused_linear_relu(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
+    let rg = is_grad_enabled()
+        && (input.requires_grad()
+            || weight.requires_grad()
+            || bias.map(|b| b.requires_grad()).unwrap_or(false));
+    if rg {
+        return relu(&linear(input, weight, bias));
+    }
+    let wt = transpose_data(weight);
+    let y = matmul_raw(input, &wt);
+    {
+        let mut yi = y.inner.borrow_mut();
+        let n = yi.shape[0];
+        let out_f = yi.shape[1];
+        let yd = &mut *yi.data_mut_dense();
+        if let Some(b) = bias {
+            let bd = b.inner.borrow().dense_data();
+            assert_eq!(bd.len(), out_f);
+            for i in 0..n {
+                let row = &mut yd[i * out_f..(i + 1) * out_f];
+                for j in 0..out_f {
+                    let v = row[j] + bd[j];
+                    row[j] = if v > 0.0 { v } else { 0.0 };
+                }
+            }
+        } else {
+            for v in yd.iter_mut() {
+                if *v < 0.0 {
+                    *v = 0.0;
+                }
+            }
+        }
+    }
+    y
+}
+
 /// `F.mse_loss(input, target, reduction='mean')`
 pub fn mse_loss(input: &Tensor, target: &Tensor) -> Tensor {
     let diff = sub(input, target);
@@ -315,7 +358,7 @@ pub fn softmax(x: &Tensor) -> Tensor {
     let mut data = vec![0.0f32; n * c];
     let mut row_exp = vec![0.0f32; c];
     for i in 0..n {
-        let row = &xi.data[i * c..(i + 1) * c];
+        let row = &xi.dense_data()[i * c..(i + 1) * c];
         let mut m = row[0];
         for &v in &row[1..] {
             if v > m {
@@ -360,7 +403,7 @@ pub fn log_softmax(x: &Tensor) -> Tensor {
     let mut shifted = vec![0.0f32; c];
     let mut tmp = vec![0.0f32; c];
     for i in 0..n {
-        let row = &xi.data[i * c..(i + 1) * c];
+        let row = &xi.dense_data()[i * c..(i + 1) * c];
         let mut m = row[0];
         for &v in &row[1..] {
             if v > m {
@@ -407,7 +450,7 @@ pub fn cross_entropy(logits: &Tensor, target: &[usize]) -> Tensor {
     let mut probs = vec![0.0f32; n * c];
     let mut loss = 0.0f32;
     for i in 0..n {
-        let row = &xi.data[i * c..(i + 1) * c];
+        let row = &xi.dense_data()[i * c..(i + 1) * c];
         let mut m = row[0];
         for &v in row.iter().skip(1) {
             if v > m {
@@ -452,11 +495,11 @@ pub fn dropout(x: &Tensor, p: f32, train: bool, seed: u64) -> Tensor {
     }
     let scale = 1.0 / (1.0 - p);
     let xi = x.inner.borrow();
-    let n = xi.data.len();
+    let n = xi.numel();
     let rg = is_grad_enabled() && x.requires_grad();
     let mut data = vec![0.0f32; n];
     let mut state = seed;
-    let xd = xi.data.as_slice();
+    let xd = xi.dense_data();
     // Fast path: no grad → write output only.
     if !rg {
         for i in 0..n {
@@ -489,8 +532,8 @@ pub fn dropout(x: &Tensor, p: f32, train: bool, seed: u64) -> Tensor {
 pub fn tanh(x: &Tensor) -> Tensor {
     let xi = x.inner.borrow();
     let rg = is_grad_enabled() && x.requires_grad();
-    let mut data = vec![0.0f32; xi.data.len()];
-    tanh_kernel(xi.data.as_slice(), data.as_mut_slice());
+    let mut data = vec![0.0f32; xi.numel()];
+    tanh_kernel(&xi.dense_data(), data.as_mut_slice());
     let fwd = if rg { data.clone() } else { Vec::new() };
     let shape = xi.shape.clone();
     drop(xi);
@@ -529,8 +572,8 @@ fn tanh_kernel(x: &[f32], out: &mut [f32]) {
 pub fn gelu(x: &Tensor) -> Tensor {
     let xi = x.inner.borrow();
     let rg = is_grad_enabled() && x.requires_grad();
-    let mut data = vec![0.0f32; xi.data.len()];
-    gelu_kernel(xi.data.as_slice(), data.as_mut_slice());
+    let mut data = vec![0.0f32; xi.numel()];
+    gelu_kernel(&xi.dense_data(), data.as_mut_slice());
     let shape = xi.shape.clone();
     drop(xi);
     let gf = if rg {
@@ -567,8 +610,8 @@ fn gelu_kernel(x: &[f32], out: &mut [f32]) {
 pub fn silu(x: &Tensor) -> Tensor {
     let xi = x.inner.borrow();
     let rg = is_grad_enabled() && x.requires_grad();
-    let mut data = vec![0.0f32; xi.data.len()];
-    silu_kernel(xi.data.as_slice(), data.as_mut_slice());
+    let mut data = vec![0.0f32; xi.numel()];
+    silu_kernel(&xi.dense_data(), data.as_mut_slice());
     let fwd = if rg { data.clone() } else { Vec::new() };
     let shape = xi.shape.clone();
     drop(xi);

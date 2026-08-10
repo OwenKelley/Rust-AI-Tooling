@@ -5,14 +5,17 @@ use std::process;
 use std::time::Instant;
 
 use rtorch::{
-    adaptive_avg_pool2d, add, add_, avg_pool2d, cat, clamp, cross_entropy, dropout, exp, gelu,
-    generate_square_subsequent_mask, index_select, leaky_relu, load_state_dict, log, matmul,
-    max_pool2d, mean, mul, narrow, pow, relu, relu_, reshape, scaled_dot_product_attention_masked,
-    seeded_uniform, sigmoid, silu, softmax, stack, state_dict, state_dict_checksum, sum, tanh,
-    transpose, zeros, Adam, AdamW, BatchNorm1d, BatchNorm2d, Conv2d, CosineAnnealingLR,
-    CrossEntropyLoss, DataLoader, Embedding, Flatten, GRU, LSTM, LayerNorm, Linear, Module,
-    MultiStepLR, MultiheadAttention, MSELoss, ReLU, SGD, Sequential, StepLR, Tensor, TensorDataset,
+    adaptive_avg_pool2d, add, add_, avg_pool2d, cat, clamp, cross_entropy, default_collate,
+    dropout, exp, from_dataframe, from_numpy, fused_linear_relu, gelu,
+    generate_square_subsequent_mask, grad, gradcheck_max_error, index_select, leaky_relu, linear,
+    load_state_dict, log, matmul, max_pool2d, mean, mul, narrow, pow, relu, relu_, reshape,
+    scaled_dot_product_attention_masked, seeded_uniform, sigmoid, silu, softmax, square_function,
+    stack, state_dict, state_dict_checksum, sub, sum, tanh, to_dataframe, to_numpy, transpose, zeros,
+    Adam, AdamW, BatchNorm1d, BatchNorm2d, Conv2d, CosineAnnealingLR, CrossEntropyLoss, DataLoader,
+    Device, Dtype, Embedding, Flatten, GradScaler, GRU, LSTM, LayerNorm, Linear, Module, MultiStepLR,
+    MultiheadAttention, MSELoss, ReLU, SGD, Sequential, StepLR, Tensor, TensorDataset,
     TransformerActivation, TransformerDecoderLayer, TransformerEncoder, TransformerEncoderLayer,
+    bmm, nested_tensor, permute, full,
 };
 
 #[derive(Debug, Clone)]
@@ -73,6 +76,46 @@ enum Op {
     AddInplace,
     ReluInplace,
     Narrow,
+    MhaKeyPadding,
+    DataLoaderSequential,
+    CreateGraphSecond,
+    DefaultCollate,
+    GradcheckSquare,
+    CreateGraphPow,
+    DeviceCpu,
+    DtypeFloat32,
+    DtypeFloat64,
+    DtypeInt64,
+    DtypeBool,
+    ViewTransposeReshape,
+    CustomSquare,
+    CreateGraphExp,
+    CreateGraphSigmoid,
+    CreateGraphSilu,
+    CreateGraphGelu,
+    CreateGraphClamp,
+    CreateGraphLinear,
+    CreateGraphCat,
+    CreateGraphStack,
+    CreateGraphBmm,
+    CreateGraphPermute,
+    CreateGraphDropout,
+    CreateGraphIndexSelect,
+    CreateGraphLayernorm,
+    NumpyRoundtrip,
+    PandasRoundtrip,
+    CreateGraphConv2d,
+    CreateGraphBatchNorm1d,
+    CreateGraphBatchNorm2d,
+    CreateGraphMaxPool2d,
+    CreateGraphAvgPool2d,
+    CreateGraphAdaptiveAvgPool2d,
+    CreateGraphCrossEntropy,
+    CreateGraphNarrow,
+    NestedToPadded,
+    DeviceCuda,
+    FusedLinearRelu,
+    GradScalerStep,
 }
 
 impl Op {
@@ -134,6 +177,46 @@ impl Op {
             "add_" => Self::AddInplace,
             "relu_" => Self::ReluInplace,
             "narrow" => Self::Narrow,
+            "mha_key_padding" => Self::MhaKeyPadding,
+            "dataloader_sequential" => Self::DataLoaderSequential,
+            "create_graph_second" => Self::CreateGraphSecond,
+            "default_collate" => Self::DefaultCollate,
+            "gradcheck_square" => Self::GradcheckSquare,
+            "create_graph_pow" => Self::CreateGraphPow,
+            "device_cpu" => Self::DeviceCpu,
+            "dtype_float32" => Self::DtypeFloat32,
+            "dtype_float64" => Self::DtypeFloat64,
+            "dtype_int64" => Self::DtypeInt64,
+            "dtype_bool" => Self::DtypeBool,
+            "view_transpose_reshape" => Self::ViewTransposeReshape,
+            "custom_square" => Self::CustomSquare,
+            "create_graph_exp" => Self::CreateGraphExp,
+            "create_graph_sigmoid" => Self::CreateGraphSigmoid,
+            "create_graph_silu" => Self::CreateGraphSilu,
+            "create_graph_gelu" => Self::CreateGraphGelu,
+            "create_graph_clamp" => Self::CreateGraphClamp,
+            "create_graph_linear" => Self::CreateGraphLinear,
+            "create_graph_cat" => Self::CreateGraphCat,
+            "create_graph_stack" => Self::CreateGraphStack,
+            "create_graph_bmm" => Self::CreateGraphBmm,
+            "create_graph_permute" => Self::CreateGraphPermute,
+            "create_graph_dropout" => Self::CreateGraphDropout,
+            "create_graph_index_select" => Self::CreateGraphIndexSelect,
+            "create_graph_layernorm" => Self::CreateGraphLayernorm,
+            "numpy_roundtrip" => Self::NumpyRoundtrip,
+            "pandas_roundtrip" => Self::PandasRoundtrip,
+            "create_graph_conv2d" => Self::CreateGraphConv2d,
+            "create_graph_batchnorm1d" => Self::CreateGraphBatchNorm1d,
+            "create_graph_batchnorm2d" => Self::CreateGraphBatchNorm2d,
+            "create_graph_max_pool2d" => Self::CreateGraphMaxPool2d,
+            "create_graph_avg_pool2d" => Self::CreateGraphAvgPool2d,
+            "create_graph_adaptive_avg_pool2d" => Self::CreateGraphAdaptiveAvgPool2d,
+            "create_graph_cross_entropy" => Self::CreateGraphCrossEntropy,
+            "create_graph_narrow" => Self::CreateGraphNarrow,
+            "nested_to_padded" => Self::NestedToPadded,
+            "device_cuda" => Self::DeviceCuda,
+            "fused_linear_relu" => Self::FusedLinearRelu,
+            "grad_scaler_step" => Self::GradScalerStep,
             other => return Err(format!("unknown op '{other}'")),
         })
     }
@@ -196,6 +279,46 @@ impl Op {
             Self::AddInplace => "add_",
             Self::ReluInplace => "relu_",
             Self::Narrow => "narrow",
+            Self::MhaKeyPadding => "mha_key_padding",
+            Self::DataLoaderSequential => "dataloader_sequential",
+            Self::CreateGraphSecond => "create_graph_second",
+            Self::DefaultCollate => "default_collate",
+            Self::GradcheckSquare => "gradcheck_square",
+            Self::CreateGraphPow => "create_graph_pow",
+            Self::DeviceCpu => "device_cpu",
+            Self::DtypeFloat32 => "dtype_float32",
+            Self::DtypeFloat64 => "dtype_float64",
+            Self::DtypeInt64 => "dtype_int64",
+            Self::DtypeBool => "dtype_bool",
+            Self::ViewTransposeReshape => "view_transpose_reshape",
+            Self::CustomSquare => "custom_square",
+            Self::CreateGraphExp => "create_graph_exp",
+            Self::CreateGraphSigmoid => "create_graph_sigmoid",
+            Self::CreateGraphSilu => "create_graph_silu",
+            Self::CreateGraphGelu => "create_graph_gelu",
+            Self::CreateGraphClamp => "create_graph_clamp",
+            Self::CreateGraphLinear => "create_graph_linear",
+            Self::CreateGraphCat => "create_graph_cat",
+            Self::CreateGraphStack => "create_graph_stack",
+            Self::CreateGraphBmm => "create_graph_bmm",
+            Self::CreateGraphPermute => "create_graph_permute",
+            Self::CreateGraphDropout => "create_graph_dropout",
+            Self::CreateGraphIndexSelect => "create_graph_index_select",
+            Self::CreateGraphLayernorm => "create_graph_layernorm",
+            Self::NumpyRoundtrip => "numpy_roundtrip",
+            Self::PandasRoundtrip => "pandas_roundtrip",
+            Self::CreateGraphConv2d => "create_graph_conv2d",
+            Self::CreateGraphBatchNorm1d => "create_graph_batchnorm1d",
+            Self::CreateGraphBatchNorm2d => "create_graph_batchnorm2d",
+            Self::CreateGraphMaxPool2d => "create_graph_max_pool2d",
+            Self::CreateGraphAvgPool2d => "create_graph_avg_pool2d",
+            Self::CreateGraphAdaptiveAvgPool2d => "create_graph_adaptive_avg_pool2d",
+            Self::CreateGraphCrossEntropy => "create_graph_cross_entropy",
+            Self::CreateGraphNarrow => "create_graph_narrow",
+            Self::NestedToPadded => "nested_to_padded",
+            Self::DeviceCuda => "device_cuda",
+            Self::FusedLinearRelu => "fused_linear_relu",
+            Self::GradScalerStep => "grad_scaler_step",
         }
     }
 }
@@ -417,6 +540,439 @@ fn dataloader_once(n: usize, seed: u64) -> f64 {
     let ds = TensorDataset::new(features, labels);
     let mut loader = DataLoader::new(&ds, 8, true, seed + 9);
     loader.epoch_checksum()
+}
+
+fn dataloader_sequential_once(n: usize, seed: u64) -> f64 {
+    let features = seeded_uniform(&[n, 4], seed, -1.0, 1.0);
+    let labels = seeded_uniform(&[n, 1], seed + 1, -1.0, 1.0);
+    let ds = TensorDataset::new(features, labels);
+    let mut loader = DataLoader::from_sequential(&ds, 8);
+    loader.epoch_checksum()
+}
+
+fn create_graph_second_once(n: usize, seed: u64) -> f64 {
+    let x = seeded_uniform(&[n.min(8).max(4)], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let y = sum(&mul(&x, &x));
+    let g = grad(&y, &[&x], true);
+    let g2 = grad(&sum(&g[0]), &[&x], false);
+    g2[0].checksum()
+}
+
+fn default_collate_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(8).max(2);
+    let mut samples = Vec::with_capacity(batch);
+    for i in 0..batch {
+        let x = seeded_uniform(&[4], seed + i as u64, -1.0, 1.0);
+        let y = seeded_uniform(&[1], seed + 100 + i as u64, -1.0, 1.0);
+        samples.push((x, y));
+    }
+    let (xb, yb) = default_collate(&samples);
+    xb.checksum() + yb.checksum()
+}
+
+fn gradcheck_square_once(n: usize, seed: u64) -> f64 {
+    let m = n.min(6).max(3);
+    let x = seeded_uniform(&[m], seed, -0.8, 0.8);
+    gradcheck_max_error(|t| sum(&mul(t, t)), &x, 1e-3) as f64
+}
+
+fn create_graph_pow_once(n: usize, seed: u64) -> f64 {
+    let m = n.min(6).max(3);
+    let x = seeded_uniform(&[m], seed, 0.5, 1.5);
+    x.set_requires_grad(true);
+    let three = full(&x.shape(), 3.0, false);
+    let y = sum(&pow(&x, &three));
+    let g = grad(&y, &[&x], true);
+    let g2 = grad(&sum(&g[0]), &[&x], false);
+    g2[0].checksum()
+}
+
+fn device_cpu_once(n: usize, seed: u64) -> f64 {
+    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+    let y = x.to(Device::Cpu).cpu();
+    assert_eq!(y.device(), Device::Cpu);
+    assert!(!y.device().is_cuda());
+    assert_eq!(y.device().type_str(), "cpu");
+    y.checksum()
+}
+
+fn dtype_float32_once(n: usize, seed: u64) -> f64 {
+    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+    let y = x.to_dtype(Dtype::Float32).float();
+    assert_eq!(y.dtype(), Dtype::Float32);
+    assert!(y.dtype().is_floating_point());
+    assert_eq!(y.dtype().type_str(), "float32");
+    y.checksum()
+}
+
+fn dtype_float64_once(n: usize, seed: u64) -> f64 {
+    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+    let y = x.double().float();
+    assert_eq!(x.double().dtype(), Dtype::Float64);
+    assert!(x.double().dtype().is_floating_point());
+    assert_eq!(x.double().dtype().type_str(), "float64");
+    assert_eq!(y.dtype(), Dtype::Float32);
+    y.checksum()
+}
+
+fn view_transpose_reshape_once(n: usize, seed: u64) -> f64 {
+    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+    let t = transpose(&x);
+    let y = reshape(&t, &[n * n]);
+    y.checksum()
+}
+
+fn dtype_int64_once(n: usize, seed: u64) -> f64 {
+    let x = seeded_uniform(&[n, n], seed, -2.0, 2.0);
+    let i = x.long();
+    assert_eq!(i.dtype(), Dtype::Int64);
+    assert_eq!(i.dtype().type_str(), "int64");
+    i.float().checksum()
+}
+
+fn dtype_bool_once(n: usize, seed: u64) -> f64 {
+    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+    let b = x.bool_();
+    assert_eq!(b.dtype(), Dtype::Bool);
+    assert_eq!(b.dtype().type_str(), "bool");
+    b.float().checksum()
+}
+
+fn numpy_roundtrip_once(n: usize, seed: u64) -> f64 {
+    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+    let a = to_numpy(&x);
+    let y = from_numpy(&a);
+    y.checksum()
+}
+
+fn pandas_roundtrip_once(n: usize, seed: u64) -> f64 {
+    let cols = 3usize;
+    let x = seeded_uniform(&[n, cols], seed, -1.0, 1.0);
+    let df = to_dataframe(&x, &["c0", "c1", "c2"]);
+    let y = from_dataframe(&df);
+    y.checksum()
+}
+
+fn custom_square_once(n: usize, seed: u64) -> f64 {
+    let m = n.min(8).max(3);
+    let x = seeded_uniform(&[m], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let y = sum(&square_function(&x));
+    y.backward();
+    let g = x.grad().unwrap_or_else(|| vec![0.0; x.numel()]);
+    Tensor::from_vec(g, &x.shape(), false).checksum()
+}
+
+fn create_graph_exp_once(n: usize, seed: u64) -> f64 {
+    let m = n.min(8).max(3);
+    let x = seeded_uniform(&[m], seed, -0.5, 0.5);
+    x.set_requires_grad(true);
+    let y = sum(&exp(&x));
+    let g = grad(&y, &[&x], true);
+    let g2 = grad(&sum(&g[0]), &[&x], false);
+    g2[0].checksum()
+}
+
+fn create_graph_sigmoid_once(n: usize, seed: u64) -> f64 {
+    let m = n.min(8).max(3);
+    let x = seeded_uniform(&[m], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let y = sum(&sigmoid(&x));
+    let g = grad(&y, &[&x], true);
+    let g2 = grad(&sum(&g[0]), &[&x], false);
+    g2[0].checksum()
+}
+
+fn create_graph_silu_once(n: usize, seed: u64) -> f64 {
+    let m = n.min(8).max(3);
+    let x = seeded_uniform(&[m], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let y = sum(&silu(&x));
+    let g = grad(&y, &[&x], true);
+    let g2 = grad(&sum(&g[0]), &[&x], false);
+    g2[0].checksum()
+}
+
+fn create_graph_gelu_once(n: usize, seed: u64) -> f64 {
+    let m = n.min(8).max(3);
+    let x = seeded_uniform(&[m], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let y = sum(&gelu(&x));
+    let g = grad(&y, &[&x], true);
+    let g2 = grad(&sum(&g[0]), &[&x], false);
+    g2[0].checksum()
+}
+
+fn create_graph_clamp_once(n: usize, seed: u64) -> f64 {
+    let m = n.min(8).max(3);
+    let x = seeded_uniform(&[m], seed, -1.5, 1.5);
+    x.set_requires_grad(true);
+    let c = clamp(&x, -0.5, 0.5);
+    let y = sum(&mul(&c, &c));
+    let g = grad(&y, &[&x], true);
+    let g2 = grad(&sum(&g[0]), &[&x], false);
+    g2[0].checksum()
+}
+
+fn create_graph_linear_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(6).max(2);
+    let x = seeded_uniform(&[batch, 4], seed, -1.0, 1.0);
+    let w = seeded_uniform(&[3, 4], seed + 1, -0.5, 0.5);
+    let b = seeded_uniform(&[3], seed + 2, -0.1, 0.1);
+    x.set_requires_grad(true);
+    w.set_requires_grad(true);
+    b.set_requires_grad(true);
+    let out = linear(&x, &w, Some(&b));
+    let y = sum(&mul(&out, &out));
+    let gs = grad(&y, &[&x, &w, &b], true);
+    let gsum = add(&add(&sum(&gs[0]), &sum(&gs[1])), &sum(&gs[2]));
+    let g2 = grad(&gsum, &[&x, &w], false);
+    g2[0].checksum() + g2[1].checksum()
+}
+
+fn create_graph_cat_once(n: usize, seed: u64) -> f64 {
+    let rows = n.min(4).max(2);
+    let a = seeded_uniform(&[rows, 3], seed, -1.0, 1.0);
+    let b = seeded_uniform(&[rows, 3], seed + 1, -1.0, 1.0);
+    a.set_requires_grad(true);
+    b.set_requires_grad(true);
+    let c = cat(&[&a, &b], 0);
+    let y = sum(&mul(&c, &c));
+    let gs = grad(&y, &[&a, &b], true);
+    let gsum = add(&sum(&gs[0]), &sum(&gs[1]));
+    let g2 = grad(&gsum, &[&a, &b], false);
+    g2[0].checksum() + g2[1].checksum()
+}
+
+fn create_graph_stack_once(n: usize, seed: u64) -> f64 {
+    let m = n.min(3).max(2);
+    let a = seeded_uniform(&[m, m], seed, -1.0, 1.0);
+    let b = seeded_uniform(&[m, m], seed + 1, -1.0, 1.0);
+    a.set_requires_grad(true);
+    b.set_requires_grad(true);
+    let c = stack(&[&a, &b], 0);
+    let y = sum(&mul(&c, &c));
+    let gs = grad(&y, &[&a, &b], true);
+    let gsum = add(&sum(&gs[0]), &sum(&gs[1]));
+    let g2 = grad(&gsum, &[&a, &b], false);
+    g2[0].checksum() + g2[1].checksum()
+}
+
+fn create_graph_bmm_once(n: usize, seed: u64) -> f64 {
+    let bsz = n.min(3).max(2);
+    let a = seeded_uniform(&[bsz, 3, 4], seed, -1.0, 1.0);
+    let b = seeded_uniform(&[bsz, 4, 3], seed + 1, -1.0, 1.0);
+    a.set_requires_grad(true);
+    b.set_requires_grad(true);
+    let c = bmm(&a, &b);
+    let y = sum(&mul(&c, &c));
+    let gs = grad(&y, &[&a, &b], true);
+    let gsum = add(&sum(&gs[0]), &sum(&gs[1]));
+    let g2 = grad(&gsum, &[&a, &b], false);
+    g2[0].checksum() + g2[1].checksum()
+}
+
+fn create_graph_permute_once(n: usize, seed: u64) -> f64 {
+    let d = n.min(3).max(2);
+    let x = seeded_uniform(&[d, d + 1, d + 2], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let p = permute(&x, &[2, 0, 1]);
+    let y = sum(&mul(&p, &p));
+    let g = grad(&y, &[&x], true);
+    let g2 = grad(&sum(&g[0]), &[&x], false);
+    g2[0].checksum()
+}
+
+fn create_graph_dropout_once(n: usize, seed: u64) -> f64 {
+    let m = n.min(8).max(3);
+    let x = seeded_uniform(&[m], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let d = dropout(&x, 0.25, true, seed + 9);
+    let y = sum(&mul(&d, &d));
+    let g = grad(&y, &[&x], true);
+    let g2 = grad(&sum(&g[0]), &[&x], false);
+    g2[0].checksum()
+}
+
+fn create_graph_index_select_once(n: usize, seed: u64) -> f64 {
+    let rows = n.min(6).max(4);
+    let x = seeded_uniform(&[rows, 3], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let idx = vec![0usize, rows / 2, rows - 1];
+    let s = index_select(&x, 0, &idx);
+    let y = sum(&mul(&s, &s));
+    let g = grad(&y, &[&x], true);
+    let g2 = grad(&sum(&g[0]), &[&x], false);
+    g2[0].checksum()
+}
+
+fn create_graph_layernorm_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(4).max(2);
+    let c = 4usize;
+    let x = seeded_uniform(&[batch, c], seed, -1.0, 1.0);
+    let w = seeded_uniform(&[c], seed + 1, 0.5, 1.5);
+    let b = seeded_uniform(&[c], seed + 2, -0.1, 0.1);
+    let ln = LayerNorm::from_params(w, b, 1e-5);
+    x.set_requires_grad(true);
+    let out = ln.forward(&x);
+    let y = sum(&mul(&out, &out));
+    let gs = grad(&y, &[&x, &ln.weight, &ln.bias], true);
+    let s = add(&add(&sum(&gs[0]), &sum(&gs[1])), &sum(&gs[2]));
+    let g2 = grad(&s, &[&x, &ln.weight, &ln.bias], false);
+    g2[0].checksum() + g2[1].checksum() + g2[2].checksum()
+}
+
+fn create_graph_conv2d_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(3).max(2);
+    let spatial = n.min(6).max(4);
+    let cin = 2usize;
+    let cout = 3usize;
+    let k = 3usize;
+    let x = seeded_uniform(&[batch, cin, spatial, spatial], seed, -1.0, 1.0);
+    let w = seeded_uniform(&[cout, cin, k, k], seed + 1, -0.2, 0.2);
+    let b = seeded_uniform(&[cout], seed + 2, -0.1, 0.1);
+    let conv = Conv2d::from_params(w, Some(b));
+    x.set_requires_grad(true);
+    let out = conv.forward(&x);
+    let y = sum(&mul(&out, &out));
+    let gs = grad(&y, &[&x, &conv.weight, conv.bias.as_ref().unwrap()], true);
+    gs[0].checksum() + gs[1].checksum() + gs[2].checksum()
+}
+
+fn create_graph_batchnorm1d_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(8).max(4);
+    let c = 4usize;
+    let x = seeded_uniform(&[batch, c], seed, -1.0, 1.0);
+    let w = seeded_uniform(&[c], seed + 1, 0.5, 1.5);
+    let b = seeded_uniform(&[c], seed + 2, -0.1, 0.1);
+    let bn = BatchNorm1d::from_params(w, b, 1e-5, 0.1);
+    x.set_requires_grad(true);
+    let out = bn.forward(&x);
+    let y = sum(&mul(&out, &out));
+    let gs = grad(&y, &[&x, &bn.weight, &bn.bias], true);
+    gs[0].checksum() + gs[1].checksum() + gs[2].checksum()
+}
+
+fn create_graph_batchnorm2d_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(3).max(2);
+    let spatial = n.min(5).max(3);
+    let c = 3usize;
+    let x = seeded_uniform(&[batch, c, spatial, spatial], seed, -1.0, 1.0);
+    let w = seeded_uniform(&[c], seed + 1, 0.5, 1.5);
+    let b = seeded_uniform(&[c], seed + 2, -0.1, 0.1);
+    let bn = BatchNorm2d::from_params(w, b, 1e-5, 0.1);
+    x.set_requires_grad(true);
+    let out = bn.forward(&x);
+    let y = sum(&mul(&out, &out));
+    let gs = grad(&y, &[&x, &bn.weight, &bn.bias], true);
+    gs[0].checksum() + gs[1].checksum() + gs[2].checksum()
+}
+
+fn create_graph_max_pool2d_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(3).max(2);
+    let spatial = n.min(6).max(4);
+    let x = seeded_uniform(&[batch, 2, spatial, spatial], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let out = max_pool2d(&x, 2, 2);
+    let y = sum(&mul(&out, &out));
+    let g = grad(&y, &[&x], true);
+    g[0].checksum()
+}
+
+fn create_graph_avg_pool2d_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(3).max(2);
+    let spatial = n.min(6).max(4);
+    let x = seeded_uniform(&[batch, 2, spatial, spatial], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let out = avg_pool2d(&x, 2, 2);
+    let y = sum(&mul(&out, &out));
+    let g = grad(&y, &[&x], true);
+    g[0].checksum()
+}
+
+fn create_graph_adaptive_avg_pool2d_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(3).max(2);
+    let spatial = n.min(6).max(4);
+    let x = seeded_uniform(&[batch, 2, spatial, spatial], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let out = adaptive_avg_pool2d(&x, 2, 2);
+    let y = sum(&mul(&out, &out));
+    let g = grad(&y, &[&x], true);
+    g[0].checksum()
+}
+
+fn create_graph_cross_entropy_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(8).max(4);
+    let classes = 5usize;
+    let logits = seeded_uniform(&[batch, classes], seed, -1.0, 1.0);
+    let target = make_class_targets(batch, classes, seed + 3);
+    logits.set_requires_grad(true);
+    let y = cross_entropy(&logits, &target);
+    let g = grad(&y, &[&logits], true);
+    g[0].checksum()
+}
+
+fn create_graph_narrow_once(n: usize, seed: u64) -> f64 {
+    let rows = n.min(8).max(4);
+    let cols = 6usize;
+    let x = seeded_uniform(&[rows, cols], seed, -1.0, 1.0);
+    x.set_requires_grad(true);
+    let start = 1usize;
+    let length = 3usize;
+    let out = narrow(&x, 1, start, length);
+    let y = sum(&mul(&out, &out));
+    let g = grad(&y, &[&x], true);
+    g[0].checksum()
+}
+
+fn nested_to_padded_once(n: usize, seed: u64) -> f64 {
+    let n = n.min(6).max(3);
+    let mut parts = Vec::with_capacity(n);
+    for i in 0..n {
+        let len = (i % 3) + 1;
+        parts.push(seeded_uniform(&[len], seed + i as u64, -1.0, 1.0));
+    }
+    let nt = nested_tensor(parts);
+    nt.to_padded_tensor(0.0).checksum()
+}
+
+fn device_cuda_once() -> f64 {
+    assert!(Device::Cuda.is_cuda());
+    assert!(!Device::Cpu.is_cuda());
+    assert_eq!(Device::Cuda.type_str(), "cuda");
+    1.0
+}
+
+fn fused_linear_relu_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(16).max(4);
+    let in_f = 8usize;
+    let out_f = 6usize;
+    let x = seeded_uniform(&[batch, in_f], seed, -1.0, 1.0);
+    let w = seeded_uniform(&[out_f, in_f], seed + 1, -0.2, 0.2);
+    let b = seeded_uniform(&[out_f], seed + 2, -0.1, 0.1);
+    fused_linear_relu(&x, &w, Some(&b)).checksum()
+}
+
+fn grad_scaler_step_once(n: usize, seed: u64) -> f64 {
+    let batch = n.min(16).max(4);
+    let in_f = 4usize;
+    let out_f = 3usize;
+    let x = seeded_uniform(&[batch, in_f], seed, -1.0, 1.0);
+    let target = seeded_uniform(&[batch, out_f], seed + 1, -0.5, 0.5);
+    let layer = make_linear(in_f, out_f, seed + 10);
+    let opt = SGD::new(layer.parameters(), 0.05);
+    let mut scaler = GradScaler::new();
+    scaler.scale = 8.0;
+    for _ in 0..3 {
+        opt.zero_grad();
+        let y = layer.forward(&x);
+        let loss = mean(&mul(&sub(&y, &target), &sub(&y, &target)));
+        let scaled = scaler.scale_loss(&loss);
+        scaled.backward();
+        scaler.step_sgd(&opt);
+    }
+    layer.forward(&x).checksum() + scaler.get_scale() as f64
 }
 
 fn adam_state_dict_once(seed: u64) -> f64 {
@@ -1250,6 +1806,386 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(narrow(&a, 1, start, length));
+                }),
+            )
+        }
+        Op::MhaKeyPadding => {
+            let batch = n.min(2).max(1);
+            let seq = n.min(4).max(2);
+            let embed = 8usize;
+            let heads = 2usize;
+            let x = seeded_uniform(&[batch, seq, embed], seed, -1.0, 1.0);
+            let ipw = seeded_uniform(&[3 * embed, embed], seed + 1, -0.2, 0.2);
+            let ipb = seeded_uniform(&[3 * embed], seed + 2, -0.1, 0.1);
+            let ow = seeded_uniform(&[embed, embed], seed + 3, -0.2, 0.2);
+            let ob = seeded_uniform(&[embed], seed + 4, -0.1, 0.1);
+            let mha = MultiheadAttention::from_params(ipw, ipb, ow, ob, heads);
+            // Pad the last key position for every batch row (f32 >0.5 ⇒ pad).
+            let mut kpm_data = vec![0.0f32; batch * seq];
+            for b in 0..batch {
+                kpm_data[b * seq + (seq - 1)] = 1.0;
+            }
+            let kpm = Tensor::from_vec(kpm_data, &[batch, seq], false);
+            let checksum = mha
+                .forward_qkv_masked(&x, &x, &x, None, Some(&kpm))
+                .0
+                .checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(mha.forward_qkv_masked(&x, &x, &x, None, Some(&kpm)).0);
+                }),
+            )
+        }
+        Op::DataLoaderSequential => {
+            let samples = n.min(32).max(16);
+            let checksum = dataloader_sequential_once(samples, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(dataloader_sequential_once(samples, seed));
+                }),
+            )
+        }
+        Op::CreateGraphSecond => {
+            let checksum = create_graph_second_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_second_once(n, seed));
+                }),
+            )
+        }
+        Op::DefaultCollate => {
+            let checksum = default_collate_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(default_collate_once(n, seed));
+                }),
+            )
+        }
+        Op::GradcheckSquare => {
+            let checksum = gradcheck_square_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(gradcheck_square_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphPow => {
+            let checksum = create_graph_pow_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_pow_once(n, seed));
+                }),
+            )
+        }
+        Op::DeviceCpu => {
+            let checksum = device_cpu_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(device_cpu_once(n, seed));
+                }),
+            )
+        }
+        Op::DtypeFloat32 => {
+            let checksum = dtype_float32_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(dtype_float32_once(n, seed));
+                }),
+            )
+        }
+        Op::DtypeFloat64 => {
+            let checksum = dtype_float64_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(dtype_float64_once(n, seed));
+                }),
+            )
+        }
+        Op::ViewTransposeReshape => {
+            let checksum = view_transpose_reshape_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(view_transpose_reshape_once(n, seed));
+                }),
+            )
+        }
+        Op::DtypeInt64 => {
+            let checksum = dtype_int64_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(dtype_int64_once(n, seed));
+                }),
+            )
+        }
+        Op::DtypeBool => {
+            let checksum = dtype_bool_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(dtype_bool_once(n, seed));
+                }),
+            )
+        }
+        Op::CustomSquare => {
+            let checksum = custom_square_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(custom_square_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphExp => {
+            let checksum = create_graph_exp_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_exp_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphSigmoid => {
+            let checksum = create_graph_sigmoid_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_sigmoid_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphSilu => {
+            let checksum = create_graph_silu_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_silu_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphGelu => {
+            let checksum = create_graph_gelu_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_gelu_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphClamp => {
+            let checksum = create_graph_clamp_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_clamp_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphLinear => {
+            let checksum = create_graph_linear_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_linear_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphCat => {
+            let checksum = create_graph_cat_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_cat_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphStack => {
+            let checksum = create_graph_stack_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_stack_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphBmm => {
+            let checksum = create_graph_bmm_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_bmm_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphPermute => {
+            let checksum = create_graph_permute_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_permute_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphDropout => {
+            let checksum = create_graph_dropout_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_dropout_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphIndexSelect => {
+            let checksum = create_graph_index_select_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_index_select_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphLayernorm => {
+            let checksum = create_graph_layernorm_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_layernorm_once(n, seed));
+                }),
+            )
+        }
+        Op::NumpyRoundtrip => {
+            let checksum = numpy_roundtrip_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(numpy_roundtrip_once(n, seed));
+                }),
+            )
+        }
+        Op::PandasRoundtrip => {
+            let checksum = pandas_roundtrip_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(pandas_roundtrip_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphConv2d => {
+            let checksum = create_graph_conv2d_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_conv2d_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphBatchNorm1d => {
+            let checksum = create_graph_batchnorm1d_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_batchnorm1d_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphBatchNorm2d => {
+            let checksum = create_graph_batchnorm2d_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_batchnorm2d_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphMaxPool2d => {
+            let checksum = create_graph_max_pool2d_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_max_pool2d_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphAvgPool2d => {
+            let checksum = create_graph_avg_pool2d_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_avg_pool2d_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphAdaptiveAvgPool2d => {
+            let checksum = create_graph_adaptive_avg_pool2d_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_adaptive_avg_pool2d_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphCrossEntropy => {
+            let checksum = create_graph_cross_entropy_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_cross_entropy_once(n, seed));
+                }),
+            )
+        }
+        Op::CreateGraphNarrow => {
+            let checksum = create_graph_narrow_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(create_graph_narrow_once(n, seed));
+                }),
+            )
+        }
+        Op::NestedToPadded => {
+            let checksum = nested_to_padded_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(nested_to_padded_once(n, seed));
+                }),
+            )
+        }
+        Op::DeviceCuda => {
+            let checksum = device_cuda_once();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(device_cuda_once());
+                }),
+            )
+        }
+        Op::FusedLinearRelu => {
+            let checksum = fused_linear_relu_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(fused_linear_relu_once(n, seed));
+                }),
+            )
+        }
+        Op::GradScalerStep => {
+            let checksum = grad_scaler_step_once(n, seed);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(grad_scaler_step_once(n, seed));
                 }),
             )
         }

@@ -2,24 +2,38 @@
 //!
 //! Local/`std` only. Names mirror PyTorch for parity harnesses.
 
+pub mod amp;
 pub mod autograd;
+pub mod bridge;
 pub mod broadcast;
 pub mod context;
 pub mod data;
+pub mod device;
+pub mod dtype;
 pub mod functional;
 pub mod gemm;
 pub mod math_kernels;
+pub mod nested;
 pub mod nn;
 pub mod ops;
 pub mod optim;
 pub mod tensor;
 
-pub use context::{is_grad_enabled, no_grad, set_grad_enabled, NoGradGuard};
-pub use data::{DataLoader, TensorDataset};
-pub use functional::{
-    cross_entropy, dropout, gelu, leaky_relu, linear, log_softmax, mse_loss, relu,
-    scaled_dot_product_attention, scaled_dot_product_attention_masked, sigmoid, silu, softmax, tanh,
+pub use amp::{autocast, is_autocast_enabled, AutocastGuard, GradScaler};
+pub use bridge::{
+    from_dataframe, from_numpy, from_numpy_f32, to_dataframe, to_numpy, to_numpy_f32,
 };
+pub use context::{is_grad_enabled, no_grad, set_grad_enabled, NoGradGuard};
+pub use data::{default_collate, DataLoader, RandomSampler, SequentialSampler, TensorDataset};
+pub use device::Device;
+pub use dtype::Dtype;
+pub use nested::{nested_tensor, NestedTensor};
+pub use functional::{
+    cross_entropy, dropout, fused_linear_relu, gelu, leaky_relu, linear, log_softmax, mse_loss,
+    relu, scaled_dot_product_attention, scaled_dot_product_attention_masked, sigmoid, silu, softmax,
+    tanh,
+};
+pub use autograd::{apply_function, grad, gradcheck_max_error, square_function, FunctionCtx};
 pub use nn::{
     adaptive_avg_pool2d, avg_pool2d, generate_square_subsequent_mask, load_state_dict, max_pool2d,
     state_dict, state_dict_checksum, AdaptiveAvgPool2d, AvgPool2d, BatchNorm1d, BatchNorm2d, Conv2d,

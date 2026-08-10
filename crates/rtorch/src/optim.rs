@@ -26,7 +26,8 @@ impl SGD {
                 Some(g) => g,
                 None => continue,
             };
-            for (w, gw) in inner.data.iter_mut().zip(g.iter()) {
+            let mut d = inner.data_mut_dense();
+            for (w, gw) in d.iter_mut().zip(g.iter()) {
                 *w -= self.lr * gw;
             }
         }
@@ -89,7 +90,7 @@ impl Adam {
                 vi[j] = self.beta2 * vi[j] + (1.0 - self.beta2) * g[j] * g[j];
                 let mhat = mi[j] / b1t;
                 let vhat = vi[j] / b2t;
-                inner.data[j] -= self.lr * mhat / (vhat.sqrt() + self.eps);
+                inner.data_mut_dense()[j] -= self.lr * mhat / (vhat.sqrt() + self.eps);
             }
         }
     }
@@ -107,7 +108,7 @@ impl Adam {
             params: self
                 .params
                 .iter()
-                .map(|p| p.inner.borrow().data.clone())
+                .map(|p| p.inner.borrow().dense_data())
                 .collect(),
         }
     }
@@ -125,7 +126,7 @@ impl Adam {
         self.v = sd.exp_avg_sq.clone();
         for (p, data) in self.params.iter().zip(sd.params.iter()) {
             assert_eq!(p.numel(), data.len());
-            p.inner.borrow_mut().data.copy_from_slice(data);
+            p.inner.borrow_mut().data_mut_dense().copy_from_slice(data);
         }
     }
 }
@@ -215,14 +216,17 @@ impl AdamW {
             };
             let mi = &mut self.m[i];
             let vi = &mut self.v[i];
-            for j in 0..g.len() {
-                // Decoupled weight decay (PyTorch AdamW default).
-                inner.data[j] -= self.lr * self.weight_decay * inner.data[j];
-                mi[j] = self.beta1 * mi[j] + (1.0 - self.beta1) * g[j];
-                vi[j] = self.beta2 * vi[j] + (1.0 - self.beta2) * g[j] * g[j];
-                let mhat = mi[j] / b1t;
-                let vhat = vi[j] / b2t;
-                inner.data[j] -= self.lr * mhat / (vhat.sqrt() + self.eps);
+            {
+                let mut d = inner.data_mut_dense();
+                for j in 0..g.len() {
+                    // Decoupled weight decay (PyTorch AdamW default).
+                    d[j] -= self.lr * self.weight_decay * d[j];
+                    mi[j] = self.beta1 * mi[j] + (1.0 - self.beta1) * g[j];
+                    vi[j] = self.beta2 * vi[j] + (1.0 - self.beta2) * g[j] * g[j];
+                    let mhat = mi[j] / b1t;
+                    let vhat = vi[j] / b2t;
+                    d[j] -= self.lr * mhat / (vhat.sqrt() + self.eps);
+                }
             }
         }
     }

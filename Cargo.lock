@@ -33,3 +33,7 @@ dependencies = [
 [[package]]
 name = "rtorch"
 version = "0.1.0"
+dependencies = [
+ "rnumpy",
+ "rpandas",
+]

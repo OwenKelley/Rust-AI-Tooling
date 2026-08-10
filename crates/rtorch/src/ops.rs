@@ -6,7 +6,9 @@ use crate::autograd::GradFn;
 use crate::broadcast::{broadcast_shapes, expand_to};
 use crate::context::is_grad_enabled;
 use crate::gemm::gemm_f32;
-use crate::tensor::{Tensor, TensorInner};
+use crate::device::Device;
+use crate::dtype::Dtype;
+use crate::tensor::{row_major_strides, Tensor, TensorInner, TensorStorage};
 
 fn shape_len(shape: &[usize]) -> usize {
     if shape.is_empty() {
@@ -26,17 +28,19 @@ fn wrap(
     requires_grad: bool,
     grad_fn: Option<GradFn>,
 ) -> Tensor {
-    Tensor::from_inner(TensorInner {
+    Tensor::from_inner(TensorInner::new_contiguous(
         data,
-        shape: shape.to_vec(),
+        shape.to_vec(),
+        Device::Cpu,
+        Dtype::Float32,
         requires_grad,
-        grad: if requires_grad {
+        if requires_grad {
             Some(vec![0.0; shape_len(shape)])
         } else {
             None
         },
         grad_fn,
-    })
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -186,12 +190,14 @@ unsafe fn bin_inplace_avx2(a: &mut [f32], b: &[f32], kind: BinKind) {
 }
 
 fn zip_bin(a: &Tensor, b: &Tensor, kind: BinKind, make_gf: impl FnOnce() -> GradFn) -> Tensor {
+    let a = a.as_contiguous();
+    let b = b.as_contiguous();
     let ai = a.inner.borrow();
     let bi = b.inner.borrow();
     let out_shape = broadcast_shapes(&ai.shape, &bi.shape);
     let mut data = vec![0.0f32; shape_len(&out_shape)];
     if ai.shape == out_shape && bi.shape == out_shape {
-        bin_apply(ai.data.as_slice(), bi.data.as_slice(), data.as_mut_slice(), kind);
+        bin_apply(&ai.dense_data(), &bi.dense_data(), data.as_mut_slice(), kind);
     } else if ai.shape == out_shape {
         // Only expand the smaller operand.
         if bi.shape.len() == 1
@@ -201,15 +207,15 @@ fn zip_bin(a: &Tensor, b: &Tensor, kind: BinKind, make_gf: impl FnOnce() -> Grad
             // (M, N) ⊕ (N,) — fuse without materializing broadcast of b.
             let m = out_shape[0];
             let n = out_shape[1];
-            let ad = ai.data.as_slice();
-            let bd = bi.data.as_slice();
+            let ad = &ai.dense_data();
+            let bd = &bi.dense_data();
             for i in 0..m {
                 let off = i * n;
                 bin_apply(&ad[off..off + n], bd, &mut data[off..off + n], kind);
             }
         } else {
-            let bd = expand_to(&bi.data, &bi.shape, &out_shape);
-            bin_apply(ai.data.as_slice(), &bd, data.as_mut_slice(), kind);
+            let bd = expand_to(&bi.dense_data(), &bi.shape, &out_shape);
+            bin_apply(&ai.dense_data(), &bd, data.as_mut_slice(), kind);
         }
     } else if bi.shape == out_shape {
         if ai.shape.len() == 1
@@ -218,22 +224,22 @@ fn zip_bin(a: &Tensor, b: &Tensor, kind: BinKind, make_gf: impl FnOnce() -> Grad
         {
             let m = out_shape[0];
             let n = out_shape[1];
-            let ad = ai.data.as_slice();
-            let bd = bi.data.as_slice();
+            let ad = &ai.dense_data();
+            let bd = &bi.dense_data();
             for i in 0..m {
                 let off = i * n;
                 bin_apply(ad, &bd[off..off + n], &mut data[off..off + n], kind);
             }
         } else {
-            let ad = expand_to(&ai.data, &ai.shape, &out_shape);
-            bin_apply(&ad, bi.data.as_slice(), data.as_mut_slice(), kind);
+            let ad = expand_to(&ai.dense_data(), &ai.shape, &out_shape);
+            bin_apply(&ad, &bi.dense_data(), data.as_mut_slice(), kind);
         }
     } else {
-        let ad = expand_to(&ai.data, &ai.shape, &out_shape);
-        let bd = expand_to(&bi.data, &bi.shape, &out_shape);
+        let ad = expand_to(&ai.dense_data(), &ai.shape, &out_shape);
+        let bd = expand_to(&bi.dense_data(), &bi.shape, &out_shape);
         bin_apply(&ad, &bd, data.as_mut_slice(), kind);
     }
-    let rg_flag = wants_grad(&[a, b]);
+    let rg_flag = wants_grad(&[&a, &b]);
     drop((ai, bi));
     let gf = if rg_flag { Some(make_gf()) } else { None };
     wrap(data, &out_shape, rg_flag, gf)
@@ -310,10 +316,12 @@ pub fn div(a: &Tensor, b: &Tensor) -> Tensor {
 }
 
 pub fn neg(a: &Tensor) -> Tensor {
-    let ai = a.inner.borrow();
-    let mut data = vec![0.0f32; ai.data.len()];
-    for i in 0..ai.data.len() {
-        data[i] = -ai.data[i];
+    let ac = a.as_contiguous();
+    let ai = ac.inner.borrow();
+    let ad = ai.dense_data();
+    let mut data = vec![0.0f32; ai.numel()];
+    for i in 0..ai.numel() {
+        data[i] = -ad[i];
     }
     let shape = ai.shape.clone();
     let rg = wants_grad(&[a]);
@@ -327,10 +335,12 @@ pub fn neg(a: &Tensor) -> Tensor {
 }
 
 pub fn abs(a: &Tensor) -> Tensor {
-    let ai = a.inner.borrow();
-    let mut data = vec![0.0f32; ai.data.len()];
-    for i in 0..ai.data.len() {
-        data[i] = ai.data[i].abs();
+    let ac = a.as_contiguous();
+    let ai = ac.inner.borrow();
+    let ad = ai.dense_data();
+    let mut data = vec![0.0f32; ai.numel()];
+    for i in 0..ai.numel() {
+        data[i] = ad[i].abs();
     }
     let shape = ai.shape.clone();
     let rg = wants_grad(&[a]);
@@ -345,8 +355,8 @@ pub fn abs(a: &Tensor) -> Tensor {
 
 pub fn exp(a: &Tensor) -> Tensor {
     let ai = a.inner.borrow();
-    let mut data = vec![0.0f32; ai.data.len()];
-    crate::math_kernels::exp_f32(ai.data.as_slice(), data.as_mut_slice());
+    let mut data = vec![0.0f32; ai.numel()];
+    crate::math_kernels::exp_f32(&ai.dense_data(), data.as_mut_slice());
     let shape = ai.shape.clone();
     let rg = wants_grad(&[a]);
     drop(ai);
@@ -363,8 +373,8 @@ pub fn exp(a: &Tensor) -> Tensor {
 
 pub fn log(a: &Tensor) -> Tensor {
     let ai = a.inner.borrow();
-    let mut data = vec![0.0f32; ai.data.len()];
-    crate::math_kernels::log_f32(ai.data.as_slice(), data.as_mut_slice());
+    let mut data = vec![0.0f32; ai.numel()];
+    crate::math_kernels::log_f32(&ai.dense_data(), data.as_mut_slice());
     let shape = ai.shape.clone();
     let rg = wants_grad(&[a]);
     drop(ai);
@@ -383,10 +393,10 @@ pub fn pow(a: &Tensor, b: &Tensor) -> Tensor {
     let out_shape = broadcast_shapes(&ai.shape, &bi.shape);
     let mut data = vec![0.0f32; shape_len(&out_shape)];
     if ai.shape == out_shape && bi.shape == out_shape {
-        crate::math_kernels::pow_f32(ai.data.as_slice(), bi.data.as_slice(), data.as_mut_slice());
+        crate::math_kernels::pow_f32(&ai.dense_data(), &bi.dense_data(), data.as_mut_slice());
     } else {
-        let ad = expand_to(&ai.data, &ai.shape, &out_shape);
-        let bd = expand_to(&bi.data, &bi.shape, &out_shape);
+        let ad = expand_to(&ai.dense_data(), &ai.shape, &out_shape);
+        let bd = expand_to(&bi.dense_data(), &bi.shape, &out_shape);
         crate::math_kernels::pow_f32(&ad, &bd, data.as_mut_slice());
     }
     let rg = wants_grad(&[a, b]);
@@ -402,7 +412,7 @@ pub fn pow(a: &Tensor, b: &Tensor) -> Tensor {
 pub fn clamp(a: &Tensor, min: f32, max: f32) -> Tensor {
     assert!(min <= max, "clamp: min > max");
     let ai = a.inner.borrow();
-    let data: Vec<f32> = ai.data.iter().map(|&v| v.clamp(min, max)).collect();
+    let data: Vec<f32> = ai.dense_data().iter().map(|&v| v.clamp(min, max)).collect();
     let shape = ai.shape.clone();
     let rg = wants_grad(&[a]);
     drop(ai);
@@ -441,7 +451,7 @@ pub fn matmul_raw(a: &Tensor, b: &Tensor) -> Tensor {
     let m = ai.shape[0];
     let k = ai.shape[1];
     let n = bi.shape[1];
-    let out = gemm_f32(&ai.data, &bi.data, m, k, n);
+    let out = gemm_f32(&ai.dense_data(), &bi.dense_data(), m, k, n);
     drop((ai, bi));
     Tensor::from_vec(out, &[m, n], false)
 }
@@ -466,51 +476,110 @@ pub fn transpose_data(a: &Tensor) -> Tensor {
     let ai = a.inner.borrow();
     assert_eq!(ai.shape.len(), 2);
     let (m, n) = (ai.shape[0], ai.shape[1]);
-    let ad = ai.data.as_slice();
-    let mut out = Vec::with_capacity(m * n);
-    // Avoid zero-fill; every element is written below.
-    unsafe {
-        out.set_len(m * n);
-    }
-    const TS: usize = 64;
-    let mut i0 = 0;
-    while i0 < m {
-        let i1 = (i0 + TS).min(m);
-        let mut j0 = 0;
-        while j0 < n {
-            let j1 = (j0 + TS).min(n);
-            for i in i0..i1 {
-                let src_row = i * n;
-                for j in j0..j1 {
-                    out[j * m + i] = ad[src_row + j];
+    // Non-F32: always materialize a contiguous typed copy (no zero-copy views).
+    if !ai.storage.is_f32() {
+        let out = match &ai.storage {
+            TensorStorage::I64(_) => {
+                let src = ai.gather_i64();
+                let mut dst = vec![0i64; m * n];
+                for i in 0..m {
+                    for j in 0..n {
+                        dst[j * m + i] = src[i * n + j];
+                    }
                 }
+                drop(ai);
+                Tensor::from_i64(dst, &[n, m])
             }
-            j0 = j1;
-        }
-        i0 = i1;
+            TensorStorage::Bool(_) => {
+                let src = ai.gather_bool_bytes();
+                let mut dst = vec![0u8; m * n];
+                for i in 0..m {
+                    for j in 0..n {
+                        dst[j * m + i] = src[i * n + j];
+                    }
+                }
+                let data: Vec<bool> = dst.into_iter().map(|x| x != 0).collect();
+                drop(ai);
+                Tensor::from_bool(data, &[n, m])
+            }
+            TensorStorage::F32(_) => unreachable!(),
+        };
+        return out;
     }
+    // F32 zero-copy view: swap shape and strides.
+    let out = TensorInner {
+        storage: ai.storage.clone(),
+        shape: vec![n, m],
+        strides: vec![ai.strides[1], ai.strides[0]],
+        offset: ai.offset,
+        device: ai.device,
+        dtype: ai.dtype,
+        requires_grad: false,
+        grad: None,
+        grad_fn: None,
+    };
     drop(ai);
-    Tensor::from_vec(out, &[n, m], false)
+    Tensor::from_inner(out)
 }
 
 pub fn reshape(a: &Tensor, shape: &[usize]) -> Tensor {
     assert_eq!(shape_len(shape), a.numel(), "reshape: numel mismatch");
     let rg = wants_grad(&[a]);
-    let data = a.inner.borrow().data.clone();
-    let gf = if rg {
-        Some(GradFn::Reshape {
-            input: a.clone(),
-        })
+    let base = if a.is_contiguous() {
+        a.clone()
     } else {
-        None
+        a.contiguous()
     };
-    wrap(data, shape, rg, gf)
+    let bi = base.inner.borrow();
+    let out = if !bi.storage.is_f32() {
+        // Non-F32: materialize contiguous typed buffer with new shape.
+        match &bi.storage {
+            TensorStorage::I64(_) => {
+                let data = bi.gather_i64();
+                drop(bi);
+                Tensor::from_i64(data, shape)
+            }
+            TensorStorage::Bool(_) => {
+                let data: Vec<bool> = bi
+                    .gather_bool_bytes()
+                    .into_iter()
+                    .map(|x| x != 0)
+                    .collect();
+                drop(bi);
+                Tensor::from_bool(data, shape)
+            }
+            TensorStorage::F32(_) => unreachable!(),
+        }
+    } else {
+        let out = TensorInner {
+            storage: bi.storage.clone(),
+            shape: shape.to_vec(),
+            strides: row_major_strides(shape),
+            offset: bi.offset,
+            device: bi.device,
+            dtype: bi.dtype,
+            requires_grad: false,
+            grad: None,
+            grad_fn: None,
+        };
+        drop(bi);
+        Tensor::from_inner(out)
+    };
+    if rg {
+        let mut t = out.inner.borrow_mut();
+        t.requires_grad = true;
+        t.grad = Some(vec![0.0; t.numel()]);
+        t.grad_fn = Some(GradFn::Reshape {
+            input: a.clone(),
+        });
+    }
+    out
 }
 
 pub fn sum(a: &Tensor) -> Tensor {
     let (s, rg, numel) = {
         let ai = a.inner.borrow();
-        let s: f32 = ai.data.iter().sum();
+        let s: f32 = ai.dense_data().iter().sum();
         (s, wants_grad(&[a]), ai.numel())
     };
     let gf = if rg {
@@ -528,7 +597,7 @@ pub fn mean(a: &Tensor) -> Tensor {
     let (s, rg, n) = {
         let ai = a.inner.borrow();
         let n = ai.numel();
-        let s = ai.data.iter().sum::<f32>() / n as f32;
+        let s = ai.dense_data().iter().sum::<f32>() / n as f32;
         (s, wants_grad(&[a]), n)
     };
     let gf = if rg {
@@ -573,7 +642,7 @@ pub fn cat(tensors: &[&Tensor], dim: usize) -> Tensor {
             let src_off = o * chunk;
             let dst_off = (o * out_shape[dim] + col) * inner;
             data[dst_off..dst_off + chunk]
-                .copy_from_slice(&ti.data[src_off..src_off + chunk]);
+                .copy_from_slice(&ti.dense_data()[src_off..src_off + chunk]);
             col += dlen;
         }
     }
@@ -627,7 +696,7 @@ pub fn stack(tensors: &[&Tensor], dim: usize) -> Tensor {
             let src = t.inner.borrow();
             let src_off = o * inner;
             let dst_off = (o * nstack + s) * inner;
-            data[dst_off..dst_off + inner].copy_from_slice(&src.data[src_off..src_off + inner]);
+            data[dst_off..dst_off + inner].copy_from_slice(&src.dense_data()[src_off..src_off + inner]);
         }
     }
     let rg = wants_grad(tensors);
@@ -659,7 +728,7 @@ pub fn index_select(input: &Tensor, dim: usize, indices: &[usize]) -> Tensor {
         for (new_k, &old_k) in indices.iter().enumerate() {
             let s = (o * dim_size + old_k) * inner;
             let d = (o * nidx + new_k) * inner;
-            data[d..d + inner].copy_from_slice(&src.data[s..s + inner]);
+            data[d..d + inner].copy_from_slice(&src.dense_data()[s..s + inner]);
         }
     }
     drop(src);
@@ -703,7 +772,7 @@ pub fn chunk(input: &Tensor, chunks: usize, dim: usize) -> Vec<Tensor> {
                 for j in 0..inner {
                     let s = (o * shape[dim] + start + k) * inner + j;
                     let d = (o * length + k) * inner + j;
-                    data[d] = src.data[s];
+                    data[d] = src.dense_data()[s];
                 }
             }
         }
@@ -740,8 +809,8 @@ pub fn bmm(a: &Tensor, b: &Tensor) -> Tensor {
         let b_off = bi_i * k * n;
         let o_off = bi_i * m * n;
         let block = gemm_f32(
-            &ai.data[a_off..a_off + m * k],
-            &bi.data[b_off..b_off + k * n],
+            &ai.dense_data()[a_off..a_off + m * k],
+            &bi.dense_data()[b_off..b_off + k * n],
             m,
             k,
             n,
@@ -770,7 +839,7 @@ pub fn permute(input: &Tensor, dims: &[usize]) -> Tensor {
     }
     let out_shape: Vec<usize> = dims.iter().map(|&d| shape[d]).collect();
     let src = input.inner.borrow();
-    let data = crate::autograd::permute_data(&src.data, &shape, dims);
+    let data = crate::autograd::permute_data(&src.dense_data(), &shape, dims);
     drop(src);
     let rg = wants_grad(&[input]);
     let gf = if rg {
@@ -796,16 +865,16 @@ pub fn add_(a: &Tensor, b: &Tensor) {
     assert_inplace_leaf(a);
     if Rc::ptr_eq(&a.inner, &b.inner) {
         let mut ai = a.inner.borrow_mut();
-        let n = ai.data.len();
+        let n = ai.numel();
         for i in 0..n {
-            ai.data[i] *= 2.0;
+            ai.data_mut_dense()[i] *= 2.0;
         }
         return;
     }
     let bi = b.inner.borrow();
     let mut ai = a.inner.borrow_mut();
     assert_eq!(ai.shape, bi.shape, "add_: same shape only");
-    bin_apply_inplace(ai.data.as_mut_slice(), bi.data.as_slice(), BinKind::Add);
+    bin_apply_inplace(&mut *ai.data_mut_dense(), &bi.dense_data(), BinKind::Add);
 }
 
 /// `tensor.sub_(other)` — same-shape only.
@@ -815,7 +884,7 @@ pub fn sub_(a: &Tensor, b: &Tensor) {
     let bi = b.inner.borrow();
     let mut ai = a.inner.borrow_mut();
     assert_eq!(ai.shape, bi.shape, "sub_: same shape only");
-    bin_apply_inplace(ai.data.as_mut_slice(), bi.data.as_slice(), BinKind::Sub);
+    bin_apply_inplace(&mut *ai.data_mut_dense(), &bi.dense_data(), BinKind::Sub);
 }
 
 /// `tensor.mul_(other)` — same-shape only.
@@ -823,7 +892,7 @@ pub fn mul_(a: &Tensor, b: &Tensor) {
     assert_inplace_leaf(a);
     if Rc::ptr_eq(&a.inner, &b.inner) {
         let mut ai = a.inner.borrow_mut();
-        for v in ai.data.iter_mut() {
+        for v in ai.data_mut_dense().iter_mut() {
             *v *= *v;
         }
         return;
@@ -831,14 +900,14 @@ pub fn mul_(a: &Tensor, b: &Tensor) {
     let bi = b.inner.borrow();
     let mut ai = a.inner.borrow_mut();
     assert_eq!(ai.shape, bi.shape, "mul_: same shape only");
-    bin_apply_inplace(ai.data.as_mut_slice(), bi.data.as_slice(), BinKind::Mul);
+    bin_apply_inplace(&mut *ai.data_mut_dense(), &bi.dense_data(), BinKind::Mul);
 }
 
 /// `tensor.relu_()`
 pub fn relu_(a: &Tensor) {
     assert_inplace_leaf(a);
     let mut ai = a.inner.borrow_mut();
-    relu_inplace_kernel(ai.data.as_mut_slice());
+    relu_inplace_kernel(&mut *ai.data_mut_dense());
 }
 
 fn relu_inplace_kernel(x: &mut [f32]) {
@@ -891,54 +960,74 @@ pub fn zero_(a: &Tensor) {
 pub fn fill_(a: &Tensor, value: f32) {
     assert_inplace_leaf(a);
     let mut ai = a.inner.borrow_mut();
-    for v in ai.data.iter_mut() {
+    for v in ai.data_mut_dense().iter_mut() {
         *v = value;
     }
 }
 
-fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
-    let mut strides = vec![0usize; shape.len()];
-    if shape.is_empty() {
-        return strides;
-    }
-    let mut s = 1usize;
-    for i in (0..shape.len()).rev() {
-        strides[i] = s;
-        s *= shape[i];
-    }
-    strides
-}
-
-/// `torch.narrow(input, dim, start, length)` — returns an owned contiguous copy.
 pub fn narrow(input: &Tensor, dim: usize, start: usize, length: usize) -> Tensor {
     let shape = input.shape();
     assert!(dim < shape.len(), "narrow: dim out of range");
     assert!(start + length <= shape[dim], "narrow: range out of bounds");
+    let ii = input.inner.borrow();
     let mut out_shape = shape.clone();
     out_shape[dim] = length;
-    let out_n = shape_len(&out_shape);
-    let strides = contiguous_strides(&shape);
-    let ndim = shape.len();
-    let src = input.inner.borrow();
-    let mut data = vec![0.0f32; out_n];
-    let mut idx = vec![0usize; ndim];
-    for flat in 0..out_n {
-        let mut rem = flat;
-        for d in (0..ndim).rev() {
-            let size = out_shape[d];
-            idx[d] = rem % size;
-            rem /= size;
-        }
-        let mut src_flat = 0usize;
-        for d in 0..ndim {
-            let i = if d == dim { idx[d] + start } else { idx[d] };
-            src_flat += i * strides[d];
-        }
-        data[flat] = src.data[src_flat];
+    let new_offset = (ii.offset as isize + start as isize * ii.strides[dim]) as usize;
+    let out = if !ii.storage.is_f32() {
+        // Non-F32: gather the narrowed view into a contiguous typed copy.
+        let view = TensorInner {
+            storage: ii.storage.clone(),
+            shape: out_shape.clone(),
+            strides: ii.strides.clone(),
+            offset: new_offset,
+            device: ii.device,
+            dtype: ii.dtype,
+            requires_grad: false,
+            grad: None,
+            grad_fn: None,
+        };
+        let out = match &view.storage {
+            TensorStorage::I64(_) => Tensor::from_i64(view.gather_i64(), &out_shape),
+            TensorStorage::Bool(_) => {
+                let data: Vec<bool> = view
+                    .gather_bool_bytes()
+                    .into_iter()
+                    .map(|x| x != 0)
+                    .collect();
+                Tensor::from_bool(data, &out_shape)
+            }
+            TensorStorage::F32(_) => unreachable!(),
+        };
+        drop(ii);
+        out
+    } else {
+        let out = TensorInner {
+            storage: ii.storage.clone(),
+            shape: out_shape,
+            strides: ii.strides.clone(),
+            offset: new_offset,
+            device: ii.device,
+            dtype: ii.dtype,
+            requires_grad: false,
+            grad: None,
+            grad_fn: None,
+        };
+        drop(ii);
+        Tensor::from_inner(out)
+    };
+    let rg = wants_grad(&[input]);
+    if rg {
+        let mut t = out.inner.borrow_mut();
+        t.requires_grad = true;
+        t.grad = Some(vec![0.0; t.numel()]);
+        t.grad_fn = Some(GradFn::Chunk {
+            input: input.clone(),
+            dim,
+            start,
+            length,
+        });
     }
-    drop(src);
-    // Owned copy; autograd for narrow is not wired yet (leaf / no_grad path).
-    wrap(data, &out_shape, false, None)
+    out
 }
 
 /// `torch.select(input, dim, index)` — owned copy with `dim` removed.
@@ -946,8 +1035,11 @@ pub fn select(input: &Tensor, dim: usize, index: usize) -> Tensor {
     let t = narrow(input, dim, index, 1);
     let mut shape = t.shape();
     shape.remove(dim);
-    let data = t.data();
-    Tensor::from_vec(data, &shape, false)
+    match t.dtype() {
+        Dtype::Int64 => Tensor::from_i64(t.i64_data(), &shape),
+        Dtype::Bool => Tensor::from_bool(t.bool_data(), &shape),
+        d => Tensor::from_vec_dtype(t.data(), &shape, false, d),
+    }
 }
 
 #[cfg(test)]

@@ -69,6 +69,7 @@ speed checks against SciPy.
 | `A.T` / `A.tocsc()` | `rscipy::{csr_transpose,csr_to_csc}` |
 | `A + B` (CSR) | `rscipy::csr_add` |
 | `sparse.linalg.norm(A)` | `rscipy::csr_frobenius_norm` |
+| `sparse.linalg.spsolve` / `cg` | `rscipy::{spsolve,cg}` |
 
 ### `scipy.fft` → `rscipy::fft`
 
@@ -126,4 +127,4 @@ python -m core_numerical.scipy_parity.compare --size 64 --iters 20
 
 ## Next
 
-`sparse.linalg` (spsolve, cg); filters (`butter`/`filtfilt`), STFT/welch; fuller distributions; `dblquad` / more ODE methods.
+Filters (`butter`/`filtfilt`), STFT/welch; fuller distributions; `dblquad` / more ODE methods.

@@ -429,6 +429,32 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
 
         return thunk(), thunk
 
+    if op == "spsolve":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        for i in range(n):
+            a[i, i] += n + 1.0
+        csr = sparse.csr_matrix(a)
+        b = seeded_uniform((n,), seed + 1, -1.0, 1.0)
+
+        def thunk():
+            return sparselinalg.spsolve(csr, b)
+
+        return thunk(), thunk
+
+    if op == "cg":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        a = 0.5 * (a + a.T)
+        for i in range(n):
+            a[i, i] += n + 1.0
+        csr = sparse.csr_matrix(a)
+        b = seeded_uniform((n,), seed + 1, -1.0, 1.0)
+
+        def thunk():
+            x, _info = sparselinalg.cg(csr, b, rtol=1e-10, maxiter=n * 20)
+            return x
+
+        return thunk(), thunk
+
     if op == "fft":
         a = seeded_uniform((n,), seed, -1.0, 1.0)
 

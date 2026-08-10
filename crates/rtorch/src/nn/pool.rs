@@ -2,6 +2,8 @@
 
 use crate::autograd::GradFn;
 use crate::context::is_grad_enabled;
+use crate::device::Device;
+use crate::dtype::Dtype;
 use crate::nn::Module;
 use crate::ops::reshape;
 use crate::tensor::{Tensor, TensorInner};
@@ -9,6 +11,7 @@ use crate::tensor::{Tensor, TensorInner};
 /// `F.max_pool2d` / `nn.MaxPool2d` — NCHW, padding=0.
 pub fn max_pool2d(input: &Tensor, kernel_size: usize, stride: usize) -> Tensor {
     let xi = input.inner.borrow();
+    let xd = xi.dense_data();
     assert_eq!(xi.shape.len(), 4, "max_pool2d: NCHW");
     let (n, c, h, w) = (xi.shape[0], xi.shape[1], xi.shape[2], xi.shape[3]);
     assert!(h >= kernel_size && w >= kernel_size);
@@ -30,7 +33,7 @@ pub fn max_pool2d(input: &Tensor, kernel_size: usize, stride: usize) -> Tensor {
                             let iy = y0 + ky;
                             let ix = x0 + kx;
                             let ii = ((ni * c + ci) * h + iy) * w + ix;
-                            let v = xi.data[ii];
+                            let v = xd[ii];
                             if v > best {
                                 best = v;
                                 best_i = ii;
@@ -57,18 +60,21 @@ pub fn max_pool2d(input: &Tensor, kernel_size: usize, stride: usize) -> Tensor {
     } else {
         None
     };
-    Tensor::from_inner(TensorInner {
+    Tensor::from_inner(TensorInner::new_contiguous(
         data,
         shape,
-        requires_grad: rg,
-        grad: if rg { Some(vec![0.0; out_n]) } else { None },
-        grad_fn: gf,
-    })
+        Device::Cpu,
+        Dtype::Float32,
+        rg,
+        if rg { Some(vec![0.0; out_n]) } else { None },
+        gf,
+    ))
 }
 
 /// `F.avg_pool2d` / `nn.AvgPool2d` — NCHW, padding=0, count_include_pad=True.
 pub fn avg_pool2d(input: &Tensor, kernel_size: usize, stride: usize) -> Tensor {
     let xi = input.inner.borrow();
+    let xd = xi.dense_data();
     assert_eq!(xi.shape.len(), 4, "avg_pool2d: NCHW");
     let (n, c, h, w) = (xi.shape[0], xi.shape[1], xi.shape[2], xi.shape[3]);
     assert!(h >= kernel_size && w >= kernel_size);
@@ -87,7 +93,7 @@ pub fn avg_pool2d(input: &Tensor, kernel_size: usize, stride: usize) -> Tensor {
                     for ky in 0..kernel_size {
                         for kx in 0..kernel_size {
                             let ii = ((ni * c + ci) * h + (y0 + ky)) * w + (x0 + kx);
-                            acc += xi.data[ii];
+                            acc += xd[ii];
                         }
                     }
                     data[((ni * c + ci) * oh + oy) * ow + ox] = acc * inv;
@@ -107,13 +113,15 @@ pub fn avg_pool2d(input: &Tensor, kernel_size: usize, stride: usize) -> Tensor {
     } else {
         None
     };
-    Tensor::from_inner(TensorInner {
+    Tensor::from_inner(TensorInner::new_contiguous(
         data,
         shape,
-        requires_grad: rg,
-        grad: if rg { Some(vec![0.0; out_n]) } else { None },
-        grad_fn: gf,
-    })
+        Device::Cpu,
+        Dtype::Float32,
+        rg,
+        if rg { Some(vec![0.0; out_n]) } else { None },
+        gf,
+    ))
 }
 
 /// `F.adaptive_avg_pool2d(input, output_size)` — NCHW.
@@ -136,7 +144,7 @@ pub fn adaptive_avg_pool2d(input: &Tensor, out_h: usize, out_w: usize) -> Tensor
                     let mut cnt = 0usize;
                     for y in y0..y1 {
                         for x in x0..x1 {
-                            acc += xi.data[((ni * c + ci) * h + y) * w + x];
+                            acc += xi.dense_data()[((ni * c + ci) * h + y) * w + x];
                             cnt += 1;
                         }
                     }
@@ -157,13 +165,15 @@ pub fn adaptive_avg_pool2d(input: &Tensor, out_h: usize, out_w: usize) -> Tensor
     } else {
         None
     };
-    Tensor::from_inner(TensorInner {
+    Tensor::from_inner(TensorInner::new_contiguous(
         data,
         shape,
-        requires_grad: rg,
-        grad: if rg { Some(vec![0.0; out_n]) } else { None },
-        grad_fn: gf,
-    })
+        Device::Cpu,
+        Dtype::Float32,
+        rg,
+        if rg { Some(vec![0.0; out_n]) } else { None },
+        gf,
+    ))
 }
 
 pub struct MaxPool2d {

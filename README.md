@@ -7,6 +7,7 @@ Building Rust equivalents of the Python AI/ML stack, with parity and speed tests
 - Inventory: [`python-ai-ml-tooling.md`](python-ai-ml-tooling.md)
 - NumPy slice: [`core_numerical/README.md`](core_numerical/README.md)
 - SciPy slice: [`core_numerical/SCIPY.md`](core_numerical/SCIPY.md)
+- Next roadmap: [`core_numerical/ROADMAP.md`](core_numerical/ROADMAP.md)
 
 ## Quick compare (NumPy)
 
