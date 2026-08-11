@@ -5,7 +5,7 @@ PyTorch-shaped tensors + autograd for Rust (CPU `f32`).
 **Crate name in Cargo/code:** `rustorch`  
 **Porting from Python?** See [`TRANSLATING.md`](TRANSLATING.md) for common PyTorch → RusTorch mappings.
 
-**Operator sugar (proposed):** See [`OPERATOR_OVERLOADING.md`](OPERATOR_OVERLOADING.md). **Implemented (low-risk):** `+ - * /`, unary `-`, `+= -= *=`, and methods `matmul` / `bmm` / `t` / `reshape` / `view` / `sum` / `mean` / `pow` / `abs` / `exp` / `log`.
+**Operators / methods:** `+ - * /`, unary `-`, `+= -= *=`, plus `matmul` / `bmm` / `t` / `reshape` / `view` / `sum` / `mean` / `pow` / `abs` / `exp` / `log` (see TRANSLATING). `*` is elementwise; use `.matmul` for matrix multiply.
 
 ## Features
 
