@@ -8,6 +8,8 @@ Building Rust equivalents of the Python AI/ML stack, with parity and speed tests
 - NumPy slice: [`core_numerical/README.md`](core_numerical/README.md)
 - SciPy slice: [`core_numerical/SCIPY.md`](core_numerical/SCIPY.md)
 - Next roadmap: [`core_numerical/ROADMAP.md`](core_numerical/ROADMAP.md)
+- Speed comparisons: [`core_numerical/SPEED.md`](core_numerical/SPEED.md)
+- End-to-end examples: [`example comparisons/`](example%20comparisons/) (MNIST MLP wall-clock)
 
 ## Quick compare (NumPy)
 

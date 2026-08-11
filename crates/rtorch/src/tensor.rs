@@ -7,6 +7,28 @@ use crate::autograd::GradFn;
 use crate::device::Device;
 use crate::dtype::Dtype;
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn accumulate_f32_avx2(dst: &mut [f32], src: &[f32]) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let n = dst.len();
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let a = _mm256_loadu_ps(dst.as_ptr().add(i));
+        let b = _mm256_loadu_ps(src.as_ptr().add(i));
+        _mm256_storeu_ps(dst.as_mut_ptr().add(i), _mm256_add_ps(a, b));
+        i += 8;
+    }
+    while i < n {
+        *dst.get_unchecked_mut(i) += *src.get_unchecked(i);
+        i += 1;
+    }
+}
+
 pub type TensorRef = Rc<RefCell<TensorInner>>;
 
 /// Typed backing buffers. Float32/Float64 use `F32`; Int64/Bool use dedicated buffers.
@@ -73,7 +95,7 @@ pub struct TensorInner {
     pub dtype: Dtype,
     pub requires_grad: bool,
     pub grad: Option<Vec<f32>>,
-    pub grad_fn: Option<GradFn>,
+    pub grad_fn: Option<Rc<GradFn>>,
 }
 
 /// Row-major (C-contiguous) element strides for `shape`.
@@ -144,7 +166,7 @@ impl TensorInner {
             dtype,
             requires_grad,
             grad,
-            grad_fn,
+            grad_fn: grad_fn.map(Rc::new),
         }
     }
 
@@ -324,9 +346,15 @@ impl TensorInner {
     }
 
     pub fn zero_grad(&mut self) {
-        if self.requires_grad {
-            let n = self.numel();
-            self.grad = Some(vec![0.0; n]);
+        if !self.requires_grad {
+            return;
+        }
+        match &mut self.grad {
+            Some(g) => g.fill(0.0),
+            None => {
+                let n = self.numel();
+                self.grad = Some(vec![0.0; n]);
+            }
         }
     }
 
@@ -337,6 +365,17 @@ impl TensorInner {
         }
         match &mut self.grad {
             Some(existing) => {
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                {
+                    if existing.len() >= 8
+                        && is_x86_feature_detected!("avx2")
+                    {
+                        unsafe {
+                            accumulate_f32_avx2(existing, g);
+                        }
+                        return;
+                    }
+                }
                 for (e, &v) in existing.iter_mut().zip(g.iter()) {
                     *e += v;
                 }
@@ -558,49 +597,151 @@ impl Tensor {
         let shape = t.shape.clone();
         let from = t.dtype;
         let rg_src = t.requires_grad;
+        let contiguous = t.is_contiguous();
 
         let out = match (from, dtype) {
             (Dtype::Float32, Dtype::Float64) | (Dtype::Float64, Dtype::Float32) => {
-                let data = crate::dtype::cast_f32_data(&t.dense_data(), from, dtype);
+                // Same f32 storage; Float64 is a tag. Share buffer, retag dtype.
                 let rg = dtype.is_floating_point() && rg_src;
+                let out = TensorInner {
+                    storage: t.storage.clone(),
+                    shape: t.shape.clone(),
+                    strides: t.strides.clone(),
+                    offset: t.offset,
+                    device: t.device,
+                    dtype,
+                    requires_grad: rg,
+                    grad: if rg {
+                        Some(vec![0.0; t.numel()])
+                    } else {
+                        None
+                    },
+                    grad_fn: None,
+                };
                 drop(t);
-                Self::from_vec_dtype(data, &shape, rg, dtype)
+                return Self::from_inner(out);
             }
             (Dtype::Float32 | Dtype::Float64, Dtype::Int64) => {
-                let data: Vec<i64> = t.dense_data().iter().map(|&x| x as i64).collect();
+                let n = t.numel();
+                // Over-reserve when `n*8 == 32KiB` (n=4096) — same Windows heap bucket
+                // pathology that hurt `stack` at size=64.
+                let mut data = Vec::with_capacity(n + (n == 4096) as usize);
+                unsafe {
+                    data.set_len(n);
+                }
+                if contiguous {
+                    let sl = t.data_slice();
+                    for i in 0..n {
+                        data[i] = sl[i] as i64;
+                    }
+                } else {
+                    let dense = t.dense_data();
+                    for i in 0..n {
+                        data[i] = dense[i] as i64;
+                    }
+                }
                 drop(t);
                 Self::from_i64(data, &shape)
             }
             (Dtype::Float32 | Dtype::Float64, Dtype::Bool) => {
-                let data: Vec<bool> = t.dense_data().iter().map(|&x| x != 0.0).collect();
+                let n = t.numel();
+                let mut data = Vec::with_capacity(n);
+                if contiguous {
+                    let sl = t.data_slice();
+                    for &x in sl.iter() {
+                        data.push(x != 0.0);
+                    }
+                } else {
+                    for &x in t.dense_data().iter() {
+                        data.push(x != 0.0);
+                    }
+                }
                 drop(t);
                 Self::from_bool(data, &shape)
             }
             (Dtype::Int64, Dtype::Float32) => {
-                let data: Vec<f32> = t.gather_i64().iter().map(|&x| x as f32).collect();
+                let n = t.numel();
+                let mut data = Vec::with_capacity(n);
+                unsafe {
+                    data.set_len(n);
+                }
+                match &t.storage {
+                    TensorStorage::I64(s) if contiguous => {
+                        let v = s.borrow();
+                        let sl = &v[t.offset..t.offset + n];
+                        for i in 0..n {
+                            data[i] = sl[i] as f32;
+                        }
+                    }
+                    _ => {
+                        let gathered = t.gather_i64();
+                        for i in 0..n {
+                            data[i] = gathered[i] as f32;
+                        }
+                    }
+                };
                 drop(t);
                 Self::from_vec_dtype(data, &shape, false, Dtype::Float32)
             }
             (Dtype::Int64, Dtype::Float64) => {
-                let data: Vec<f32> = t.gather_i64().iter().map(|&x| x as f32).collect();
+                let n = t.numel();
+                let mut data = Vec::with_capacity(n);
+                unsafe {
+                    data.set_len(n);
+                }
+                match &t.storage {
+                    TensorStorage::I64(s) if contiguous => {
+                        let v = s.borrow();
+                        let sl = &v[t.offset..t.offset + n];
+                        for i in 0..n {
+                            data[i] = sl[i] as f32;
+                        }
+                    }
+                    _ => {
+                        let gathered = t.gather_i64();
+                        for i in 0..n {
+                            data[i] = gathered[i] as f32;
+                        }
+                    }
+                };
                 drop(t);
                 Self::from_vec_dtype(data, &shape, false, Dtype::Float64)
             }
             (Dtype::Bool, Dtype::Float32) => {
-                let data: Vec<f32> = t
-                    .gather_bool_bytes()
-                    .iter()
-                    .map(|&x| if x != 0 { 1.0 } else { 0.0 })
-                    .collect();
+                let n = t.numel();
+                let data: Vec<f32> = match &t.storage {
+                    TensorStorage::Bool(s) if contiguous => {
+                        let v = s.borrow();
+                        v[t.offset..t.offset + n]
+                            .iter()
+                            .map(|&x| if x != 0 { 1.0 } else { 0.0 })
+                            .collect()
+                    }
+                    _ => t
+                        .gather_bool_bytes()
+                        .iter()
+                        .map(|&x| if x != 0 { 1.0 } else { 0.0 })
+                        .collect(),
+                };
                 drop(t);
                 Self::from_vec_dtype(data, &shape, false, Dtype::Float32)
             }
             (Dtype::Bool, Dtype::Float64) => {
-                let data: Vec<f32> = t
-                    .gather_bool_bytes()
-                    .iter()
-                    .map(|&x| if x != 0 { 1.0 } else { 0.0 })
-                    .collect();
+                let n = t.numel();
+                let data: Vec<f32> = match &t.storage {
+                    TensorStorage::Bool(s) if contiguous => {
+                        let v = s.borrow();
+                        v[t.offset..t.offset + n]
+                            .iter()
+                            .map(|&x| if x != 0 { 1.0 } else { 0.0 })
+                            .collect()
+                    }
+                    _ => t
+                        .gather_bool_bytes()
+                        .iter()
+                        .map(|&x| if x != 0 { 1.0 } else { 0.0 })
+                        .collect(),
+                };
                 drop(t);
                 Self::from_vec_dtype(data, &shape, false, Dtype::Float64)
             }
@@ -643,6 +784,35 @@ impl Tensor {
         self.to_dtype(Dtype::Int64)
     }
 
+    /// `x.long().float()` in one pass: `(x as i64) as f32` (trunc toward zero).
+    pub fn long_float(&self) -> Tensor {
+        let t = self.inner.borrow();
+        assert!(
+            matches!(t.dtype, Dtype::Float32 | Dtype::Float64),
+            "long_float: expected floating input"
+        );
+        let shape = t.shape.clone();
+        let n = t.numel();
+        let contiguous = t.is_contiguous();
+        let mut data = Vec::with_capacity(n + (n == 4096) as usize);
+        unsafe {
+            data.set_len(n);
+        }
+        if contiguous {
+            let sl = t.data_slice();
+            for i in 0..n {
+                data[i] = (sl[i] as i64) as f32;
+            }
+        } else {
+            let dense = t.dense_data();
+            for i in 0..n {
+                data[i] = (dense[i] as i64) as f32;
+            }
+        }
+        drop(t);
+        Self::from_vec(data, &shape, false)
+    }
+
     /// `tensor.bool()`
     pub fn bool_(&self) -> Tensor {
         self.to_dtype(Dtype::Bool)
@@ -654,10 +824,16 @@ impl Tensor {
 
     /// Borrow dense f32 data without cloning (materializes a contiguous clone if needed).
     pub fn with_data<R>(&self, f: impl FnOnce(&[f32]) -> R) -> R {
-        let c = self.as_contiguous();
-        let inner = c.inner.borrow();
-        let slice = inner.data_slice();
-        f(&slice)
+        if self.is_contiguous() {
+            let inner = self.inner.borrow();
+            let slice = inner.data_slice();
+            f(&slice)
+        } else {
+            let c = self.contiguous();
+            let inner = c.inner.borrow();
+            let slice = inner.data_slice();
+            f(&slice)
+        }
     }
 
     /// Accumulate gradient from another tensor's data without an extra clone.

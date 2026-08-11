@@ -88,6 +88,8 @@ speed checks against SciPy.
 | `signal.correlate` | `rscipy::correlate` |
 | `signal.windows.hann` / `hamming` / `blackman` | `rscipy::{hann,hamming,blackman}` |
 | `signal.detrend` | `rscipy::detrend` |
+| `signal.butter` / `lfilter` / `filtfilt` | `rscipy::{butter,lfilter,filtfilt}` |
+| `signal.welch` / `stft` (mag) | `rscipy::{welch,stft}` |
 
 ### `scipy.integrate` → `rscipy::integrate`
 
@@ -127,4 +129,4 @@ python -m core_numerical.scipy_parity.compare --size 64 --iters 20
 
 ## Next
 
-Filters (`butter`/`filtfilt`), STFT/welch; fuller distributions; `dblquad` / more ODE methods.
+Fuller distributions; `dblquad` / more ODE methods.

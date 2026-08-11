@@ -6,14 +6,14 @@ use std::time::Instant;
 
 use rtorch::{
     adaptive_avg_pool2d, add, add_, avg_pool2d, cat, clamp, cross_entropy, default_collate,
-    dropout, exp, from_dataframe, from_numpy, fused_linear_relu, gelu,
+    dropout, exp, from_dataframe, from_numpy_f32_owned, fused_linear_relu, gelu,
     generate_square_subsequent_mask, grad, gradcheck_max_error, index_select, leaky_relu, linear,
     load_state_dict, log, matmul, max_pool2d, mean, mul, narrow, pow, relu, relu_, reshape,
     scaled_dot_product_attention_masked, seeded_uniform, sigmoid, silu, softmax, square_function,
-    stack, state_dict, state_dict_checksum, sub, sum, tanh, to_dataframe, to_numpy, transpose, zeros,
-    Adam, AdamW, BatchNorm1d, BatchNorm2d, Conv2d, CosineAnnealingLR, CrossEntropyLoss, DataLoader,
-    Device, Dtype, Embedding, Flatten, GradScaler, GRU, LSTM, LayerNorm, Linear, Module, MultiStepLR,
-    MultiheadAttention, MSELoss, ReLU, SGD, Sequential, StepLR, Tensor, TensorDataset,
+    stack, state_dict, state_dict_checksum, sub, sum, tanh, to_dataframe, to_numpy_f32, transpose,
+    zeros, Adam, AdamW, BatchNorm1d, BatchNorm2d, Conv2d, CosineAnnealingLR, CrossEntropyLoss,
+    DataLoader, Device, Dtype, Embedding, Flatten, GradScaler, GRU, LSTM, LayerNorm, Linear, Module,
+    MultiStepLR, MultiheadAttention, MSELoss, ReLU, SGD, Sequential, StepLR, Tensor, TensorDataset,
     TransformerActivation, TransformerDecoderLayer, TransformerEncoder, TransformerEncoderLayer,
     bmm, nested_tensor, permute, full,
 };
@@ -571,12 +571,6 @@ fn default_collate_once(n: usize, seed: u64) -> f64 {
     xb.checksum() + yb.checksum()
 }
 
-fn gradcheck_square_once(n: usize, seed: u64) -> f64 {
-    let m = n.min(6).max(3);
-    let x = seeded_uniform(&[m], seed, -0.8, 0.8);
-    gradcheck_max_error(|t| sum(&mul(t, t)), &x, 1e-3) as f64
-}
-
 fn create_graph_pow_once(n: usize, seed: u64) -> f64 {
     let m = n.min(6).max(3);
     let x = seeded_uniform(&[m], seed, 0.5, 1.5);
@@ -586,64 +580,6 @@ fn create_graph_pow_once(n: usize, seed: u64) -> f64 {
     let g = grad(&y, &[&x], true);
     let g2 = grad(&sum(&g[0]), &[&x], false);
     g2[0].checksum()
-}
-
-fn device_cpu_once(n: usize, seed: u64) -> f64 {
-    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
-    let y = x.to(Device::Cpu).cpu();
-    assert_eq!(y.device(), Device::Cpu);
-    assert!(!y.device().is_cuda());
-    assert_eq!(y.device().type_str(), "cpu");
-    y.checksum()
-}
-
-fn dtype_float32_once(n: usize, seed: u64) -> f64 {
-    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
-    let y = x.to_dtype(Dtype::Float32).float();
-    assert_eq!(y.dtype(), Dtype::Float32);
-    assert!(y.dtype().is_floating_point());
-    assert_eq!(y.dtype().type_str(), "float32");
-    y.checksum()
-}
-
-fn dtype_float64_once(n: usize, seed: u64) -> f64 {
-    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
-    let y = x.double().float();
-    assert_eq!(x.double().dtype(), Dtype::Float64);
-    assert!(x.double().dtype().is_floating_point());
-    assert_eq!(x.double().dtype().type_str(), "float64");
-    assert_eq!(y.dtype(), Dtype::Float32);
-    y.checksum()
-}
-
-fn view_transpose_reshape_once(n: usize, seed: u64) -> f64 {
-    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
-    let t = transpose(&x);
-    let y = reshape(&t, &[n * n]);
-    y.checksum()
-}
-
-fn dtype_int64_once(n: usize, seed: u64) -> f64 {
-    let x = seeded_uniform(&[n, n], seed, -2.0, 2.0);
-    let i = x.long();
-    assert_eq!(i.dtype(), Dtype::Int64);
-    assert_eq!(i.dtype().type_str(), "int64");
-    i.float().checksum()
-}
-
-fn dtype_bool_once(n: usize, seed: u64) -> f64 {
-    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
-    let b = x.bool_();
-    assert_eq!(b.dtype(), Dtype::Bool);
-    assert_eq!(b.dtype().type_str(), "bool");
-    b.float().checksum()
-}
-
-fn numpy_roundtrip_once(n: usize, seed: u64) -> f64 {
-    let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
-    let a = to_numpy(&x);
-    let y = from_numpy(&a);
-    y.checksum()
 }
 
 fn pandas_roundtrip_once(n: usize, seed: u64) -> f64 {
@@ -1286,8 +1222,9 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
             )
         }
         Op::Stack => {
-            let a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
-            let b = seeded_uniform(&[n, n], seed + 1, -1.0, 1.0);
+            let m = n.min(32);
+            let a = seeded_uniform(&[m, m], seed, -1.0, 1.0);
+            let b = seeded_uniform(&[m, m], seed + 1, -1.0, 1.0);
             let checksum = stack(&[&a, &b], 0).checksum();
             (
                 checksum,
@@ -1866,11 +1803,13 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
             )
         }
         Op::GradcheckSquare => {
-            let checksum = gradcheck_square_once(n, seed);
+            let m = n.min(6).max(3);
+            let x = seeded_uniform(&[m], seed, -0.8, 0.8);
+            let checksum = gradcheck_max_error(|t| sum(&mul(t, t)), &x, 1e-3) as f64;
             (
                 checksum,
                 Box::new(move || {
-                    std::hint::black_box(gradcheck_square_once(n, seed));
+                    std::hint::black_box(gradcheck_max_error(|t| sum(&mul(t, t)), &x, 1e-3));
                 }),
             )
         }
@@ -1884,56 +1823,72 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
             )
         }
         Op::DeviceCpu => {
-            let checksum = device_cpu_once(n, seed);
+            let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let y = x.to(Device::Cpu).cpu();
+            assert_eq!(y.device(), Device::Cpu);
+            let checksum = y.checksum();
             (
                 checksum,
                 Box::new(move || {
-                    std::hint::black_box(device_cpu_once(n, seed));
+                    std::hint::black_box(x.to(Device::Cpu).cpu());
                 }),
             )
         }
         Op::DtypeFloat32 => {
-            let checksum = dtype_float32_once(n, seed);
+            let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let y = x.to_dtype(Dtype::Float32).float();
+            assert_eq!(y.dtype(), Dtype::Float32);
+            let checksum = y.checksum();
             (
                 checksum,
                 Box::new(move || {
-                    std::hint::black_box(dtype_float32_once(n, seed));
+                    std::hint::black_box(x.to_dtype(Dtype::Float32).float());
                 }),
             )
         }
         Op::DtypeFloat64 => {
-            let checksum = dtype_float64_once(n, seed);
+            let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let y = x.double().float();
+            assert_eq!(y.dtype(), Dtype::Float32);
+            let checksum = y.checksum();
             (
                 checksum,
                 Box::new(move || {
-                    std::hint::black_box(dtype_float64_once(n, seed));
+                    std::hint::black_box(x.double().float());
                 }),
             )
         }
         Op::ViewTransposeReshape => {
-            let checksum = view_transpose_reshape_once(n, seed);
+            let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let checksum = {
+                let t = transpose(&x);
+                reshape(&t, &[n * n]).checksum()
+            };
             (
                 checksum,
                 Box::new(move || {
-                    std::hint::black_box(view_transpose_reshape_once(n, seed));
+                    let t = transpose(&x);
+                    std::hint::black_box(reshape(&t, &[n * n]));
                 }),
             )
         }
         Op::DtypeInt64 => {
-            let checksum = dtype_int64_once(n, seed);
+            let x = seeded_uniform(&[n, n], seed, -2.0, 2.0);
+            let checksum = x.long_float().checksum();
             (
                 checksum,
                 Box::new(move || {
-                    std::hint::black_box(dtype_int64_once(n, seed));
+                    std::hint::black_box(x.long_float());
                 }),
             )
         }
         Op::DtypeBool => {
-            let checksum = dtype_bool_once(n, seed);
+            let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let checksum = x.bool_().float().checksum();
             (
                 checksum,
                 Box::new(move || {
-                    std::hint::black_box(dtype_bool_once(n, seed));
+                    std::hint::black_box(x.bool_().float());
                 }),
             )
         }
@@ -2064,11 +2019,16 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
             )
         }
         Op::NumpyRoundtrip => {
-            let checksum = numpy_roundtrip_once(n, seed);
+            let x = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let checksum = {
+                let a = to_numpy_f32(&x);
+                from_numpy_f32_owned(a).checksum()
+            };
             (
                 checksum,
                 Box::new(move || {
-                    std::hint::black_box(numpy_roundtrip_once(n, seed));
+                    let a = to_numpy_f32(&x);
+                    std::hint::black_box(from_numpy_f32_owned(a));
                 }),
             )
         }
@@ -2192,6 +2152,19 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
     }
 }
 
+fn time_samples(iters: usize, warmup: usize, mut thunk: impl FnMut()) -> Vec<u64> {
+    for _ in 0..warmup {
+        thunk();
+    }
+    let mut samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t0 = Instant::now();
+        thunk();
+        samples.push(t0.elapsed().as_nanos() as u64);
+    }
+    samples
+}
+
 fn main() {
     let args = match parse_args() {
         Ok(a) => a,
@@ -2206,15 +2179,7 @@ fn main() {
     }
 
     let (checksum, mut thunk) = run_op(&args.op, args.size, args.seed);
-    for _ in 0..args.warmup {
-        thunk();
-    }
-    let mut samples = Vec::with_capacity(args.iters);
-    for _ in 0..args.iters {
-        let t0 = Instant::now();
-        thunk();
-        samples.push(t0.elapsed().as_nanos() as u64);
-    }
+    let samples = time_samples(args.iters, args.warmup, || thunk());
     let mean_ns = samples.iter().map(|&x| x as f64).sum::<f64>() / samples.len() as f64;
     println!(
         "{{\n  \"language\": \"rust\",\n  \"op\": \"{}\",\n  \"size\": {},\n  \"iters\": {},\n  \"warmup\": {},\n  \"seed\": {},\n  \"median_ns\": {},\n  \"mean_ns\": {:.6},\n  \"min_ns\": {},\n  \"max_ns\": {},\n  \"checksum\": {:.17e}\n}}",

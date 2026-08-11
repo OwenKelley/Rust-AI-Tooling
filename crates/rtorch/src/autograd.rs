@@ -89,6 +89,13 @@ pub enum GradFn {
         weight: Tensor,
         bias: Option<Tensor>,
     },
+    /// `relu(linear(...))` with a single tape node (saves the ReLU mask).
+    FusedLinearRelu {
+        input: Tensor,
+        weight: Tensor,
+        bias: Option<Tensor>,
+        mask: Vec<bool>,
+    },
     Cat {
         inputs: Vec<Tensor>,
         dim: usize,
@@ -110,6 +117,16 @@ pub enum GradFn {
     },
     CrossEntropy {
         logits: Tensor,
+        probs: Vec<f32>,
+        target: Vec<usize>,
+        n: usize,
+        c: usize,
+    },
+    /// `cross_entropy(linear(x, W, b), target)` as one tape node.
+    FusedLinearCrossEntropy {
+        input: Tensor,
+        weight: Tensor,
+        bias: Option<Tensor>,
         probs: Vec<f32>,
         target: Vec<usize>,
         n: usize,
@@ -285,11 +302,13 @@ impl std::fmt::Debug for GradFn {
             GradFn::Reshape { .. } => "Reshape",
             GradFn::Transpose2d { .. } => "Transpose2d",
             GradFn::Linear { .. } => "Linear",
+            GradFn::FusedLinearRelu { .. } => "FusedLinearRelu",
             GradFn::Cat { .. } => "Cat",
             GradFn::IndexSelect { .. } => "IndexSelect",
             GradFn::Softmax { .. } => "Softmax",
             GradFn::LogSoftmax { .. } => "LogSoftmax",
             GradFn::CrossEntropy { .. } => "CrossEntropy",
+            GradFn::FusedLinearCrossEntropy { .. } => "FusedLinearCrossEntropy",
             GradFn::Dropout { .. } => "Dropout",
             GradFn::Stack { .. } => "Stack",
             GradFn::Embedding { .. } => "Embedding",
@@ -329,9 +348,12 @@ fn visit(
     if !visited.insert(ptr) {
         return;
     }
-    let grad_fn = t.inner.borrow().grad_fn.clone();
+    let grad_fn = {
+        let inner = t.inner.borrow();
+        inner.grad_fn.clone()
+    };
     if let Some(gf) = grad_fn {
-        match &gf {
+        match &*gf {
             GradFn::Add(ab)
             | GradFn::Sub(ab)
             | GradFn::Mul(ab)
@@ -363,10 +385,28 @@ fn visit(
             GradFn::CrossEntropy { logits, .. } => {
                 visit(logits, visited, order);
             }
+            GradFn::FusedLinearCrossEntropy {
+                input,
+                weight,
+                bias,
+                ..
+            } => {
+                visit(input, visited, order);
+                visit(weight, visited, order);
+                if let Some(b) = bias {
+                    visit(b, visited, order);
+                }
+            }
             GradFn::Linear {
                 input,
                 weight,
                 bias,
+            }
+            | GradFn::FusedLinearRelu {
+                input,
+                weight,
+                bias,
+                ..
             } => {
                 visit(input, visited, order);
                 visit(weight, visited, order);
@@ -552,12 +592,27 @@ pub fn apply_backward(gf: &GradFn, gy: &[f32]) {
             input.inner.borrow_mut().accumulate_grad(&g);
         }
         GradFn::Relu { input, mask } => {
-            let gin: Vec<f32> = gy
-                .iter()
-                .zip(mask.iter())
-                .map(|(g, &m)| if m { *g } else { 0.0 })
-                .collect();
-            input.inner.borrow_mut().accumulate_grad(&gin);
+            let mut t = input.inner.borrow_mut();
+            if !t.requires_grad {
+                return;
+            }
+            match &mut t.grad {
+                Some(existing) => {
+                    for (e, (g, &m)) in existing.iter_mut().zip(gy.iter().zip(mask.iter())) {
+                        if m {
+                            *e += *g;
+                        }
+                    }
+                }
+                None => {
+                    let gin: Vec<f32> = gy
+                        .iter()
+                        .zip(mask.iter())
+                        .map(|(g, &m)| if m { *g } else { 0.0 })
+                        .collect();
+                    t.grad = Some(gin);
+                }
+            }
         }
         GradFn::LeakyRelu {
             input,
@@ -646,26 +701,18 @@ pub fn apply_backward(gf: &GradFn, gy: &[f32]) {
             weight,
             bias,
         } => {
-            let x = input;
-            let w = weight;
-            let n = x.shape()[0];
-            let out_f = w.shape()[0];
-            let y_shape = vec![n, out_f];
-            let gy_t = Tensor::from_vec(gy.to_vec(), &y_shape, false);
-            let gx = matmul_raw(&gy_t, w);
-            let gy_tt = transpose_data(&gy_t);
-            let gw = matmul_raw(&gy_tt, x);
-            x.accumulate_from(&gx);
-            w.accumulate_from(&gw);
-            if let Some(b) = bias {
-                let mut db = vec![0.0f32; out_f];
-                for i in 0..n {
-                    for j in 0..out_f {
-                        db[j] += gy[i * out_f + j];
-                    }
-                }
-                b.inner.borrow_mut().accumulate_grad(&db);
-            }
+            apply_linear_vjp(gy, input, weight, bias.as_ref());
+        }
+        GradFn::FusedLinearRelu {
+            input,
+            weight,
+            bias,
+            mask,
+        } => {
+            let mut gpre = crate::bufpool::take_f32(gy.len());
+            crate::cpu_kernels::apply_relu_mask(gy, mask, &mut gpre);
+            apply_linear_vjp(&gpre, input, weight, bias.as_ref());
+            crate::bufpool::recycle_f32(gpre);
         }
         GradFn::Cat {
             inputs,
@@ -764,18 +811,24 @@ pub fn apply_backward(gf: &GradFn, gy: &[f32]) {
             n,
             c,
         } => {
-            let inv_n = 1.0 / (*n as f32);
-            let mut gin = vec![0.0f32; n * c];
-            for i in 0..*n {
-                for j in 0..*c {
-                    let mut v = probs[i * *c + j];
-                    if j == target[i] {
-                        v -= 1.0;
-                    }
-                    gin[i * *c + j] = v * inv_n * gy[0];
-                }
-            }
+            let mut gin = crate::bufpool::take_f32(n * c);
+            crate::cpu_kernels::cross_entropy_input_grad(probs, target, gy[0], &mut gin, *n, *c);
             logits.inner.borrow_mut().accumulate_grad(&gin);
+            crate::bufpool::recycle_f32(gin);
+        }
+        GradFn::FusedLinearCrossEntropy {
+            input,
+            weight,
+            bias,
+            probs,
+            target,
+            n,
+            c,
+        } => {
+            let mut gin = crate::bufpool::take_f32(n * c);
+            crate::cpu_kernels::cross_entropy_input_grad(probs, target, gy[0], &mut gin, *n, *c);
+            apply_linear_vjp(&gin, input, weight, bias.as_ref());
+            crate::bufpool::recycle_f32(gin);
         }
         GradFn::Dropout { input, mask } => {
             let gin: Vec<f32> = gy.iter().zip(mask.iter()).map(|(g, &m)| g * m).collect();
@@ -1194,6 +1247,83 @@ fn invert_permute(dims: &[usize]) -> Vec<usize> {
     inv
 }
 
+fn apply_linear_vjp(gy: &[f32], input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) {
+    use crate::cpu_kernels::reduce_bias_grad;
+    use crate::gemm::{gemm_nn_into, gemm_tn_into};
+    use crate::tensor::TensorStorage;
+
+    let need_gx = input.requires_grad();
+    let need_gw = weight.requires_grad();
+    let need_gb = bias.map(|b| b.requires_grad()).unwrap_or(false);
+    if !need_gx && !need_gw && !need_gb {
+        return;
+    }
+
+    let x = input.as_contiguous();
+    let w = weight.as_contiguous();
+    let (n, in_f, out_f, x_ptr, w_ptr) = {
+        let xi = x.inner.borrow();
+        let wi = w.inner.borrow();
+        assert!(xi.is_contiguous() && wi.is_contiguous());
+        let n = xi.shape[0];
+        let in_f = xi.shape[1];
+        let out_f = wi.shape[0];
+        assert_eq!(wi.shape[1], in_f);
+        assert_eq!(gy.len(), n * out_f);
+        let x_ptr = match &xi.storage {
+            TensorStorage::F32(s) => s.borrow().as_ptr().wrapping_add(xi.offset),
+            _ => panic!("linear VJP: F32 only"),
+        };
+        let w_ptr = match &wi.storage {
+            TensorStorage::F32(s) => s.borrow().as_ptr().wrapping_add(wi.offset),
+            _ => panic!("linear VJP: F32 only"),
+        };
+        // Keep storage Rcs alive via x/w tensors below.
+        (n, in_f, out_f, x_ptr, w_ptr)
+    };
+    // Storage Rcs are owned by x/w; pointers remain valid while those live.
+    let _keep = (&x, &w);
+
+    if need_gx {
+        let mut ii = input.inner.borrow_mut();
+        let numel = n * in_f;
+        if ii.grad.is_none() {
+            ii.grad = Some(vec![0.0; numel]);
+        }
+        let g = ii.grad.as_mut().unwrap();
+        debug_assert_eq!(g.len(), numel);
+        unsafe {
+            let a = std::slice::from_raw_parts(gy.as_ptr(), n * out_f);
+            let b = std::slice::from_raw_parts(w_ptr, out_f * in_f);
+            gemm_nn_into(a, b, g, n, out_f, in_f, 1.0);
+        }
+    }
+    if need_gw {
+        let mut wi = weight.inner.borrow_mut();
+        let numel = out_f * in_f;
+        if wi.grad.is_none() {
+            wi.grad = Some(vec![0.0; numel]);
+        }
+        let g = wi.grad.as_mut().unwrap();
+        debug_assert_eq!(g.len(), numel);
+        unsafe {
+            let a = std::slice::from_raw_parts(gy.as_ptr(), n * out_f);
+            let b = std::slice::from_raw_parts(x_ptr, n * in_f);
+            gemm_tn_into(a, b, g, out_f, n, in_f, 1.0);
+        }
+    }
+    if need_gb {
+        if let Some(b) = bias {
+            let mut bi = b.inner.borrow_mut();
+            if bi.grad.is_none() {
+                bi.grad = Some(vec![0.0; out_f]);
+            }
+            let g = bi.grad.as_mut().unwrap();
+            reduce_bias_grad(gy, g, n, out_f);
+        }
+    }
+}
+
 pub(crate) fn permute_data(data: &[f32], shape: &[usize], dims: &[usize]) -> Vec<f32> {
     let ndim = shape.len();
     assert_eq!(dims.len(), ndim);
@@ -1257,11 +1387,15 @@ impl Tensor {
         }
         let order = topological_sort(self);
         for node in order.iter().rev() {
-            let (grad_v, gf) = {
+            let gf = {
                 let t = node.inner.borrow();
-                (t.grad.clone(), t.grad_fn.clone())
+                t.grad_fn.clone()
             };
-            if let (Some(g), Some(gf)) = (grad_v, gf) {
+            let Some(gf) = gf else {
+                continue;
+            };
+            let g = node.inner.borrow_mut().grad.take();
+            if let Some(g) = g {
                 apply_backward(&gf, &g);
             }
         }
@@ -1552,6 +1686,40 @@ fn apply_vjp_tensor(
             );
             accumulate_grad_map(grads, logits, gin);
         }
+        GradFn::FusedLinearCrossEntropy {
+            input,
+            weight,
+            bias,
+            probs,
+            target,
+            n,
+            c,
+        } => {
+            use crate::ops::{matmul, reshape, transpose};
+            let mut gin_data = vec![0.0f32; n * c];
+            crate::cpu_kernels::cross_entropy_input_grad(
+                probs,
+                target,
+                gy.item(),
+                &mut gin_data,
+                *n,
+                *c,
+            );
+            let gpre = Tensor::from_vec(gin_data, &[*n, *c], false);
+            assert_eq!(input.ndim(), 2);
+            assert_eq!(weight.ndim(), 2);
+            let batch = input.shape()[0];
+            let out_f = weight.shape()[0];
+            let gx = matmul(&gpre, weight);
+            let gw = matmul(&transpose(&gpre), input);
+            accumulate_grad_map(grads, input, gx);
+            accumulate_grad_map(grads, weight, gw);
+            if let Some(b) = bias {
+                let ones_row = ones(&[1, batch], false);
+                let gb = matmul(&ones_row, &gpre);
+                accumulate_grad_map(grads, b, reshape(&gb, &[out_f]));
+            }
+        }
         GradFn::Silu { input, .. } => {
             use crate::functional::sigmoid;
             use crate::ops::{add, sub};
@@ -1628,6 +1796,31 @@ fn apply_vjp_tensor(
             if let Some(b) = bias {
                 let ones_row = ones(&[1, n], false);
                 let gb = matmul(&ones_row, gy); // [1, out]
+                accumulate_grad_map(grads, b, reshape(&gb, &[out_f]));
+            }
+        }
+        GradFn::FusedLinearRelu {
+            input,
+            weight,
+            bias,
+            mask,
+        } => {
+            use crate::ops::{matmul, mul, reshape, transpose};
+            assert_eq!(input.ndim(), 2);
+            assert_eq!(weight.ndim(), 2);
+            assert_eq!(gy.ndim(), 2);
+            let n = input.shape()[0];
+            let out_f = weight.shape()[0];
+            let mdata: Vec<f32> = mask.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect();
+            let m = Tensor::from_vec(mdata, &gy.shape(), false);
+            let gpre = mul(gy, &m);
+            let gx = matmul(&gpre, weight);
+            let gw = matmul(&transpose(&gpre), input);
+            accumulate_grad_map(grads, input, gx);
+            accumulate_grad_map(grads, weight, gw);
+            if let Some(b) = bias {
+                let ones_row = ones(&[1, n], false);
+                let gb = matmul(&ones_row, &gpre);
                 accumulate_grad_map(grads, b, reshape(&gb, &[out_f]));
             }
         }
@@ -2478,10 +2671,28 @@ fn other_inputs(gf: &GradFn) -> Vec<Tensor> {
         | GradFn::Permute { input, .. }
         | GradFn::Silu { input, .. } => v.push(input.clone()),
         GradFn::CrossEntropy { logits, .. } => v.push(logits.clone()),
+        GradFn::FusedLinearCrossEntropy {
+            input,
+            weight,
+            bias,
+            ..
+        } => {
+            v.push(input.clone());
+            v.push(weight.clone());
+            if let Some(b) = bias {
+                v.push(b.clone());
+            }
+        },
         GradFn::Linear {
             input,
             weight,
             bias,
+        }
+        | GradFn::FusedLinearRelu {
+            input,
+            weight,
+            bias,
+            ..
         } => {
             v.push(input.clone());
             v.push(weight.clone());

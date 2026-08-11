@@ -1,0 +1,16 @@
+[package]
+name = "mnist_mlp_rtorch"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone workspace so release builds stay lean (same idea as torch_micro_runner).
+[workspace]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+
+[dependencies]
+rtorch = { path = "../../../crates/rtorch" }

@@ -8,6 +8,7 @@ SciPy slice: see [`SCIPY.md`](SCIPY.md).
 Pandas slice: see [`PANDAS.md`](PANDAS.md).
 PyTorch slice: see [`TORCH.md`](TORCH.md).
 Next slices: see [`ROADMAP.md`](ROADMAP.md).
+Speed comparisons: see [`SPEED.md`](SPEED.md).
 
 ## Layout
 

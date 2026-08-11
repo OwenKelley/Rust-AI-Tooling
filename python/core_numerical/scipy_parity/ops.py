@@ -455,6 +455,52 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
 
         return thunk(), thunk
 
+    if op == "butter":
+        def thunk():
+            return sp_signal.butter(4, 0.2, btype="lowpass", output="ba")
+
+        b, a = thunk()
+        return np.concatenate([b, a]), lambda: np.concatenate(thunk())
+
+    if op == "filtfilt":
+        b, a = sp_signal.butter(4, 0.15, btype="lowpass", output="ba")
+        x = seeded_uniform((max(n, 64),), seed, -1.0, 1.0)
+
+        def thunk():
+            return sp_signal.filtfilt(b, a, x, method="pad", padtype="odd")
+
+        return thunk(), thunk
+
+    if op == "welch":
+        m = max(n, 256)
+        x = seeded_uniform((m,), seed, -1.0, 1.0)
+
+        def thunk():
+            _f, pxx = sp_signal.welch(
+                x, fs=1.0, window="hann", nperseg=64, noverlap=32, detrend=False, scaling="density"
+            )
+            return pxx
+
+        return thunk(), thunk
+
+    if op == "stft":
+        m = max(n, 256)
+        x = seeded_uniform((m,), seed, -1.0, 1.0)
+
+        def thunk():
+            _f, _t, zxx = sp_signal.stft(
+                x,
+                fs=1.0,
+                window="hann",
+                nperseg=64,
+                noverlap=32,
+                boundary=None,
+                padded=False,
+            )
+            return np.abs(zxx)
+
+        return thunk(), thunk
+
     if op == "fft":
         a = seeded_uniform((n,), seed, -1.0, 1.0)
 

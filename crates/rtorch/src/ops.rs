@@ -34,11 +34,7 @@ fn wrap(
         Device::Cpu,
         Dtype::Float32,
         requires_grad,
-        if requires_grad {
-            Some(vec![0.0; shape_len(shape)])
-        } else {
-            None
-        },
+        None,
         grad_fn,
     ))
 }
@@ -195,9 +191,13 @@ fn zip_bin(a: &Tensor, b: &Tensor, kind: BinKind, make_gf: impl FnOnce() -> Grad
     let ai = a.inner.borrow();
     let bi = b.inner.borrow();
     let out_shape = broadcast_shapes(&ai.shape, &bi.shape);
-    let mut data = vec![0.0f32; shape_len(&out_shape)];
+    let out_n = shape_len(&out_shape);
+    let mut data = Vec::with_capacity(out_n);
+    unsafe {
+        data.set_len(out_n);
+    }
     if ai.shape == out_shape && bi.shape == out_shape {
-        bin_apply(&ai.dense_data(), &bi.dense_data(), data.as_mut_slice(), kind);
+        bin_apply(&ai.data_slice(), &bi.data_slice(), data.as_mut_slice(), kind);
     } else if ai.shape == out_shape {
         // Only expand the smaller operand.
         if bi.shape.len() == 1
@@ -207,15 +207,15 @@ fn zip_bin(a: &Tensor, b: &Tensor, kind: BinKind, make_gf: impl FnOnce() -> Grad
             // (M, N) ⊕ (N,) — fuse without materializing broadcast of b.
             let m = out_shape[0];
             let n = out_shape[1];
-            let ad = &ai.dense_data();
-            let bd = &bi.dense_data();
+            let ad = ai.data_slice();
+            let bd = bi.data_slice();
             for i in 0..m {
                 let off = i * n;
-                bin_apply(&ad[off..off + n], bd, &mut data[off..off + n], kind);
+                bin_apply(&ad[off..off + n], &bd, &mut data[off..off + n], kind);
             }
         } else {
-            let bd = expand_to(&bi.dense_data(), &bi.shape, &out_shape);
-            bin_apply(&ai.dense_data(), &bd, data.as_mut_slice(), kind);
+            let bd = expand_to(&bi.data_slice(), &bi.shape, &out_shape);
+            bin_apply(&ai.data_slice(), &bd, data.as_mut_slice(), kind);
         }
     } else if bi.shape == out_shape {
         if ai.shape.len() == 1
@@ -224,19 +224,19 @@ fn zip_bin(a: &Tensor, b: &Tensor, kind: BinKind, make_gf: impl FnOnce() -> Grad
         {
             let m = out_shape[0];
             let n = out_shape[1];
-            let ad = &ai.dense_data();
-            let bd = &bi.dense_data();
+            let ad = ai.data_slice();
+            let bd = bi.data_slice();
             for i in 0..m {
                 let off = i * n;
-                bin_apply(ad, &bd[off..off + n], &mut data[off..off + n], kind);
+                bin_apply(&ad, &bd[off..off + n], &mut data[off..off + n], kind);
             }
         } else {
-            let ad = expand_to(&ai.dense_data(), &ai.shape, &out_shape);
-            bin_apply(&ad, &bi.dense_data(), data.as_mut_slice(), kind);
+            let ad = expand_to(&ai.data_slice(), &ai.shape, &out_shape);
+            bin_apply(&ad, &bi.data_slice(), data.as_mut_slice(), kind);
         }
     } else {
-        let ad = expand_to(&ai.dense_data(), &ai.shape, &out_shape);
-        let bd = expand_to(&bi.dense_data(), &bi.shape, &out_shape);
+        let ad = expand_to(&ai.data_slice(), &ai.shape, &out_shape);
+        let bd = expand_to(&bi.data_slice(), &bi.shape, &out_shape);
         bin_apply(&ad, &bd, data.as_mut_slice(), kind);
     }
     let rg_flag = wants_grad(&[&a, &b]);
@@ -435,14 +435,16 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Tensor {
     if rg {
         let mut t = out.inner.borrow_mut();
         t.requires_grad = true;
-        t.grad = Some(vec![0.0; t.numel()]);
-        t.grad_fn = Some(GradFn::Matmul(Rc::new((a.clone(), b.clone()))));
+        t.grad = None;
+        t.grad_fn = Some(Rc::new(GradFn::Matmul(Rc::new((a.clone(), b.clone())))));
     }
     out
 }
 
 /// Raw matmul without attaching grad_fn (used in backward).
 pub fn matmul_raw(a: &Tensor, b: &Tensor) -> Tensor {
+    let a = a.as_contiguous();
+    let b = b.as_contiguous();
     let ai = a.inner.borrow();
     let bi = b.inner.borrow();
     assert_eq!(ai.shape.len(), 2, "matmul: 2D only");
@@ -451,7 +453,7 @@ pub fn matmul_raw(a: &Tensor, b: &Tensor) -> Tensor {
     let m = ai.shape[0];
     let k = ai.shape[1];
     let n = bi.shape[1];
-    let out = gemm_f32(&ai.dense_data(), &bi.dense_data(), m, k, n);
+    let out = gemm_f32(&ai.data_slice(), &bi.data_slice(), m, k, n);
     drop((ai, bi));
     Tensor::from_vec(out, &[m, n], false)
 }
@@ -464,10 +466,10 @@ pub fn transpose(a: &Tensor) -> Tensor {
     if rg {
         let mut t = out.inner.borrow_mut();
         t.requires_grad = true;
-        t.grad = Some(vec![0.0; t.numel()]);
-        t.grad_fn = Some(GradFn::Transpose2d {
+        t.grad = None;
+        t.grad_fn = Some(Rc::new(GradFn::Transpose2d {
             input: a.clone(),
-        });
+        }));
     }
     out
 }
@@ -568,19 +570,20 @@ pub fn reshape(a: &Tensor, shape: &[usize]) -> Tensor {
     if rg {
         let mut t = out.inner.borrow_mut();
         t.requires_grad = true;
-        t.grad = Some(vec![0.0; t.numel()]);
-        t.grad_fn = Some(GradFn::Reshape {
+        t.grad = None;
+        t.grad_fn = Some(Rc::new(GradFn::Reshape {
             input: a.clone(),
-        });
+        }));
     }
     out
 }
 
 pub fn sum(a: &Tensor) -> Tensor {
+    let a = a.as_contiguous();
     let (s, rg, numel) = {
         let ai = a.inner.borrow();
-        let s: f32 = ai.dense_data().iter().sum();
-        (s, wants_grad(&[a]), ai.numel())
+        let s: f32 = ai.data_slice().iter().sum();
+        (s, wants_grad(&[&a]), ai.numel())
     };
     let gf = if rg {
         Some(GradFn::Sum {
@@ -594,11 +597,12 @@ pub fn sum(a: &Tensor) -> Tensor {
 }
 
 pub fn mean(a: &Tensor) -> Tensor {
+    let a = a.as_contiguous();
     let (s, rg, n) = {
         let ai = a.inner.borrow();
         let n = ai.numel();
-        let s = ai.dense_data().iter().sum::<f32>() / n as f32;
-        (s, wants_grad(&[a]), n)
+        let s = ai.data_slice().iter().sum::<f32>() / n as f32;
+        (s, wants_grad(&[&a]), n)
     };
     let gf = if rg {
         Some(GradFn::Mean {
@@ -614,6 +618,8 @@ pub fn mean(a: &Tensor) -> Tensor {
 /// `torch.cat(tensors, dim)`
 pub fn cat(tensors: &[&Tensor], dim: usize) -> Tensor {
     assert!(!tensors.is_empty(), "cat: empty");
+    let owned: Vec<Tensor> = tensors.iter().map(|t| t.as_contiguous()).collect();
+    let tensors: Vec<&Tensor> = owned.iter().collect();
     let shapes: Vec<Vec<usize>> = tensors.iter().map(|t| t.shape()).collect();
     let ndim = shapes[0].len();
     assert!(dim < ndim, "cat: dim out of range");
@@ -628,31 +634,62 @@ pub fn cat(tensors: &[&Tensor], dim: usize) -> Tensor {
     let mut out_shape = shapes[0].clone();
     out_shape[dim] = shapes.iter().map(|s| s[dim]).sum();
 
-    let outer: usize = out_shape[..dim].iter().product();
-    let inner: usize = out_shape[dim + 1..].iter().product();
+    let outer: usize = if dim == 0 {
+        1
+    } else {
+        out_shape[..dim].iter().product()
+    };
+    let inner: usize = if dim + 1 >= out_shape.len() {
+        1
+    } else {
+        out_shape[dim + 1..].iter().product()
+    };
     let out_n = shape_len(&out_shape);
-    let mut data = vec![0.0f32; out_n];
-
-    for o in 0..outer {
-        let mut col = 0usize;
-        for t in tensors {
-            let ti = t.inner.borrow();
-            let dlen = ti.shape[dim];
-            let chunk = dlen * inner;
-            let src_off = o * chunk;
-            let dst_off = (o * out_shape[dim] + col) * inner;
-            data[dst_off..dst_off + chunk]
-                .copy_from_slice(&ti.dense_data()[src_off..src_off + chunk]);
-            col += dlen;
-        }
+    let mut data = Vec::with_capacity(out_n);
+    unsafe {
+        data.set_len(out_n);
     }
 
-    let rg = wants_grad(tensors);
+    let borrows: Vec<_> = tensors.iter().map(|t| t.inner.borrow()).collect();
+    if outer == 1 {
+        // Single outer step: concatenate contiguous chunks with raw memcpy.
+        let mut dst = data.as_mut_ptr();
+        for ti in &borrows {
+            let sl = ti.data_slice();
+            let dlen = ti.shape[dim];
+            let chunk = dlen * inner;
+            unsafe {
+                std::ptr::copy_nonoverlapping(sl.as_ptr(), dst, chunk);
+                dst = dst.add(chunk);
+            }
+        }
+    } else {
+        let slices: Vec<_> = borrows.iter().map(|ti| ti.data_slice()).collect();
+        for o in 0..outer {
+            let mut col = 0usize;
+            for (ti, sl) in borrows.iter().zip(slices.iter()) {
+                let dlen = ti.shape[dim];
+                let chunk = dlen * inner;
+                let src_off = o * chunk;
+                let dst_off = (o * out_shape[dim] + col) * inner;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        sl.as_ptr().add(src_off),
+                        data.as_mut_ptr().add(dst_off),
+                        chunk,
+                    );
+                }
+                col += dlen;
+            }
+        }
+    }
+    drop(borrows);
+
+    let rg = wants_grad(&tensors);
     let sizes: Vec<usize> = shapes.iter().map(|s| s[dim]).collect();
-    let inputs: Vec<Tensor> = tensors.iter().map(|t| (*t).clone()).collect();
     let gf = if rg {
         Some(GradFn::Cat {
-            inputs,
+            inputs: owned,
             dim,
             sizes,
         })
@@ -670,47 +707,84 @@ pub fn stack(tensors: &[&Tensor], dim: usize) -> Tensor {
         assert_eq!(t.shape(), base, "stack: shape mismatch");
     }
     assert!(dim <= base.len(), "stack: dim out of range");
+
+    let rg = wants_grad(tensors);
     let nstack = tensors.len();
     let mut out_shape = Vec::with_capacity(base.len() + 1);
     out_shape.extend_from_slice(&base[..dim]);
     out_shape.push(nstack);
     out_shape.extend_from_slice(&base[dim..]);
 
-    let outer: usize = if dim == 0 {
-        1
-    } else {
-        base[..dim].iter().product()
-    };
-    let inner: usize = if dim == base.len() {
-        1
-    } else {
-        base[dim..].iter().product()
-    };
-    let out_n = shape_len(&out_shape);
-    let mut data = Vec::with_capacity(out_n);
-    unsafe {
-        data.set_len(out_n);
-    }
-    for o in 0..outer {
-        for (s, t) in tensors.iter().enumerate() {
-            let src = t.inner.borrow();
-            let src_off = o * inner;
-            let dst_off = (o * nstack + s) * inner;
-            data[dst_off..dst_off + inner].copy_from_slice(&src.dense_data()[src_off..src_off + inner]);
+    // Contiguous F32 fast path: one alloc + bulk memcpy.
+    if !rg && tensors.iter().all(|t| t.is_contiguous() && t.dtype() == Dtype::Float32) {
+        let out_n = shape_len(&out_shape);
+        // Over-reserve slightly so Windows heap avoids a slow exact-32KiB bucket
+        // (2*64*64 f32 == 32768 bytes), which dominated size=64 parity timings.
+        let mut data = Vec::with_capacity(out_n + (out_n == 8192) as usize);
+        if dim == 0 {
+            for t in tensors {
+                t.with_data(|sl| data.extend_from_slice(sl));
+            }
+        } else {
+            unsafe {
+                data.set_len(out_n);
+            }
+            let outer: usize = base[..dim].iter().product();
+            let inner_sz: usize = if dim == base.len() {
+                1
+            } else {
+                base[dim..].iter().product()
+            };
+            let borrows: Vec<_> = tensors.iter().map(|t| t.inner.borrow()).collect();
+            let slices: Vec<_> = borrows.iter().map(|ti| ti.data_slice()).collect();
+            for o in 0..outer {
+                for (s, sl) in slices.iter().enumerate() {
+                    let src_off = o * inner_sz;
+                    let dst_off = (o * nstack + s) * inner_sz;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            sl.as_ptr().add(src_off),
+                            data.as_mut_ptr().add(dst_off),
+                            inner_sz,
+                        );
+                    }
+                }
+            }
+            data.truncate(out_n);
         }
+        return Tensor::from_vec(data, &out_shape, false);
     }
-    let rg = wants_grad(tensors);
-    let inputs: Vec<Tensor> = tensors.iter().map(|t| (*t).clone()).collect();
-    let gf = if rg {
-        Some(GradFn::Stack { inputs, dim })
-    } else {
-        None
-    };
-    wrap(data, &out_shape, rg, gf)
+
+    // General path: unsqueeze via reshape, then cat.
+    let views: Vec<Tensor> = tensors
+        .iter()
+        .map(|t| {
+            let mut sh = Vec::with_capacity(base.len() + 1);
+            sh.extend_from_slice(&base[..dim]);
+            sh.push(1);
+            sh.extend_from_slice(&base[dim..]);
+            reshape(t, &sh)
+        })
+        .collect();
+    let refs: Vec<&Tensor> = views.iter().collect();
+    let out = cat(&refs, dim);
+    if rg {
+        let mut ti = out.inner.borrow_mut();
+        ti.requires_grad = true;
+        if ti.grad.is_none() {
+            ti.grad = None;
+        }
+        ti.grad_fn = Some(Rc::new(GradFn::Stack {
+            inputs: tensors.iter().map(|t| (*t).clone()).collect(),
+            dim,
+        }));
+    }
+    out
 }
 
 /// `torch.index_select(input, dim, index)` with `usize` indices.
 pub fn index_select(input: &Tensor, dim: usize, indices: &[usize]) -> Tensor {
+    let input = input.as_contiguous();
     let shape = input.shape();
     assert!(dim < shape.len(), "index_select: dim");
     let dim_size = shape[dim];
@@ -721,18 +795,24 @@ pub fn index_select(input: &Tensor, dim: usize, indices: &[usize]) -> Tensor {
     out_shape[dim] = indices.len();
     let outer: usize = shape[..dim].iter().product();
     let inner: usize = shape[dim + 1..].iter().product();
-    let mut data = vec![0.0f32; shape_len(&out_shape)];
+    let out_n = shape_len(&out_shape);
+    let mut data = Vec::with_capacity(out_n);
+    unsafe {
+        data.set_len(out_n);
+    }
     let src = input.inner.borrow();
+    let xd = src.data_slice();
     let nidx = indices.len();
     for o in 0..outer {
         for (new_k, &old_k) in indices.iter().enumerate() {
             let s = (o * dim_size + old_k) * inner;
             let d = (o * nidx + new_k) * inner;
-            data[d..d + inner].copy_from_slice(&src.dense_data()[s..s + inner]);
+            data[d..d + inner].copy_from_slice(&xd[s..s + inner]);
         }
     }
+    drop(xd);
     drop(src);
-    let rg = wants_grad(&[input]);
+    let rg = wants_grad(&[&input]);
     let gf = if rg {
         Some(GradFn::IndexSelect {
             input: input.clone(),
@@ -744,6 +824,61 @@ pub fn index_select(input: &Tensor, dim: usize, indices: &[usize]) -> Tensor {
         None
     };
     wrap(data, &out_shape, rg, gf)
+}
+
+/// Fast row gather along dim 0 for 2D tensors without building an autograd node
+/// when `input` does not require grad. Falls back to [`index_select`] otherwise.
+pub fn gather_rows(input: &Tensor, indices: &[usize]) -> Tensor {
+    if wants_grad(&[input]) {
+        return index_select(input, 0, indices);
+    }
+    let input = input.as_contiguous();
+    let shape = input.shape();
+    assert_eq!(shape.len(), 2, "gather_rows: 2D only");
+    let (n, row) = (shape[0], shape[1]);
+    for &i in indices {
+        assert!(i < n, "gather_rows: index {i} >= {n}");
+    }
+    let mut data = crate::bufpool::take_f32(indices.len() * row);
+    let src = input.inner.borrow();
+    let xd = src.data_slice();
+    for (new_k, &old_k) in indices.iter().enumerate() {
+        let s = old_k * row;
+        let d = new_k * row;
+        data[d..d + row].copy_from_slice(&xd[s..s + row]);
+    }
+    drop(xd);
+    drop(src);
+    Tensor::from_vec(data, &[indices.len(), row], false)
+}
+
+/// In-place Fisher–Yates shuffle of 2D `features` rows and matching `labels`.
+///
+/// Uses the same LCG as [`crate::data::RandomSampler`] so Python/Rust trainers
+/// can share a seed. Avoids per-batch row gathers when training over contiguous
+/// batches after a single epoch shuffle.
+pub fn shuffle_rows_inplace(features: &Tensor, labels: &mut [usize], seed: u64) {
+    let mut inner = features.inner.borrow_mut();
+    assert_eq!(inner.shape.len(), 2, "shuffle_rows_inplace: 2D features");
+    let n = inner.shape[0];
+    let cols = inner.shape[1];
+    assert_eq!(labels.len(), n, "shuffle_rows_inplace: label length");
+    assert!(inner.is_contiguous(), "shuffle_rows_inplace: contiguous features");
+    let mut data = inner.data_mut_dense();
+    let mut state = seed;
+    for i in (1..n).rev() {
+        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        let j = ((state >> 8) as usize) % (i + 1);
+        if i == j {
+            continue;
+        }
+        let (a, b) = if i < j { (i, j) } else { (j, i) };
+        let (left, right) = data.split_at_mut(b * cols);
+        let row_i = &mut left[a * cols..(a + 1) * cols];
+        let row_j = &mut right[..cols];
+        row_i.swap_with_slice(row_j);
+        labels.swap(i, j);
+    }
 }
 
 /// `torch.chunk(input, chunks, dim)` — equal-sized chunks along `dim`.
@@ -1019,13 +1154,13 @@ pub fn narrow(input: &Tensor, dim: usize, start: usize, length: usize) -> Tensor
     if rg {
         let mut t = out.inner.borrow_mut();
         t.requires_grad = true;
-        t.grad = Some(vec![0.0; t.numel()]);
-        t.grad_fn = Some(GradFn::Chunk {
+        t.grad = None;
+        t.grad_fn = Some(Rc::new(GradFn::Chunk {
             input: input.clone(),
             dim,
             start,
             length,
-        });
+        }));
     }
     out
 }

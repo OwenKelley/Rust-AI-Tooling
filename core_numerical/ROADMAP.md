@@ -20,7 +20,7 @@ parity harnesses.
 | Status | Item |
 |--------|------|
 | done | `sparse.linalg`: `spsolve`, `cg` (CSR; spsolve densifies for v1) |
-| pending | Signal: `butter` / `filtfilt`, STFT / `welch` |
+| done | Signal: `butter` / `filtfilt`, `welch` / `stft` (onesided mag) |
 | pending | Fuller distributions beyond current specials |
 | pending | `dblquad` / more ODE methods beyond RK45 |
 
@@ -47,4 +47,4 @@ parity harnesses.
 
 ## Current focus
 
-**2 → Signal filters / STFT** in `crates/rscipy`, or NumPy dtype depth.
+**2 → Fuller distributions** in `rscipy`, or **3 → Pandas DatetimeIndex / resample**.

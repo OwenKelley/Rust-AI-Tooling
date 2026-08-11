@@ -1,232 +1,323 @@
-//! Contiguous row-major f32 GEMM (`C = A @ B`), local/`std` only.
+//! Contiguous row-major f32 GEMM via `matrixmultiply` (portable default).
 //!
-//! Packs NR-wide B column panels + 4×8 microkernel (AVX2/FMA when available).
-//! Parallel row split only for very large GEMMs (spawn cost dominates otherwise).
+//! With the `parallel` feature (default), mid/large GEMMs use a Rayon thread pool
+//! instead of spawning fresh OS threads per call.
 
-use std::thread;
+use matrixmultiply::sgemm;
 
 const MR: usize = 4;
-const NR: usize = 8;
-/// Prefer serial AVX2 until GEMMs are large enough that spawn pays off.
-const PARALLEL_FLOPS: u64 = 64_000_000;
+const PARALLEL_FLOPS: u64 = 4_000_000;
+const PARALLEL_MAX_WORKERS: usize = 8;
 
-#[derive(Clone, Copy)]
-enum Isa {
-    Scalar,
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    Avx2Fma,
-}
-
-fn detect_isa() -> Isa {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            return Isa::Avx2Fma;
-        }
+fn parallel_workers(m: usize, flops: u64) -> usize {
+    if flops < PARALLEL_FLOPS || m < MR * 4 {
+        return 1;
     }
-    Isa::Scalar
+    let hw = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
+    hw.min(m / MR).min(PARALLEL_MAX_WORKERS).max(1)
 }
 
 /// `C[m,n] = A[m,k] @ B[k,n]` for contiguous row-major buffers.
 pub fn gemm_f32(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     assert_eq!(a.len(), m * k, "A shape mismatch");
     assert_eq!(b.len(), k * n, "B shape mismatch");
-    let mut c = vec![0.0f32; m * n];
-    let isa = detect_isa();
-    let flops = (m as u64).saturating_mul(n as u64).saturating_mul(k as u64);
-    if flops >= PARALLEL_FLOPS && m >= MR * 8 {
-        gemm_bpanel_parallel(a, b, &mut c, m, k, n, isa);
-    } else {
-        gemm_bpanel(a, b, &mut c, m, k, n, isa);
-    }
+    let mut c = crate::bufpool::take_f32(m * n);
+    gemm_nn_into(a, b, &mut c, m, k, n, 0.0);
     c
 }
 
-fn gemm_bpanel(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, isa: Isa) {
-    let mut b_panel = vec![0.0f32; k * NR];
-    let mut j = 0;
-    while j + NR <= n {
-        for p in 0..k {
-            let src = &b[p * n + j..p * n + j + NR];
-            b_panel[p * NR..(p + 1) * NR].copy_from_slice(src);
-        }
-        gemm_bpanel_rows(a, &b_panel, c, 0, m, k, n, j, isa);
-        j += NR;
-    }
-    if j < n {
-        for i in 0..m {
-            for p in 0..k {
-                let av = a[i * k + p];
-                for jj in j..n {
-                    c[i * n + jj] += av * b[p * n + jj];
-                }
-            }
-        }
+/// `C[m,n] = A[m,k] @ B^T` where `B` is contiguous `[n,k]` (Linear: `X @ W^T`).
+pub fn gemm_f32_nt(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    assert_eq!(a.len(), m * k, "A shape mismatch");
+    assert_eq!(b.len(), n * k, "B shape mismatch");
+    let mut c = crate::bufpool::take_f32(m * n);
+    gemm_nt_into(a, b, &mut c, m, k, n, 0.0);
+    c
+}
+
+/// `C[m,n] = A^T @ B` where `A` is contiguous `[k,m]` and `B` is `[k,n]`.
+pub fn gemm_f32_tn(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    assert_eq!(a.len(), k * m, "A shape mismatch");
+    assert_eq!(b.len(), k * n, "B shape mismatch");
+    let mut c = crate::bufpool::take_f32(m * n);
+    gemm_tn_into(a, b, &mut c, m, k, n, 0.0);
+    c
+}
+
+/// `C = A @ B + beta * C` (row-major).
+pub fn gemm_nn_into(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, beta: f32) {
+    assert_eq!(a.len(), m * k);
+    assert_eq!(b.len(), k * n);
+    assert_eq!(c.len(), m * n);
+    let flops = (m as u64).saturating_mul(n as u64).saturating_mul(k as u64);
+    let workers = parallel_workers(m, flops);
+    if workers <= 1 {
+        sgemm_nn_beta(a, b, c, m, k, n, beta);
+    } else {
+        sgemm_nn_parallel(a, b, c, m, k, n, workers, beta);
     }
 }
 
-fn gemm_bpanel_parallel(
+/// `C = A @ B^T + beta * C` (`B` stored `[n,k]`).
+pub fn gemm_nt_into(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, beta: f32) {
+    assert_eq!(a.len(), m * k);
+    assert_eq!(b.len(), n * k);
+    assert_eq!(c.len(), m * n);
+    let flops = (m as u64).saturating_mul(n as u64).saturating_mul(k as u64);
+    let workers = parallel_workers(m, flops);
+    if workers <= 1 {
+        sgemm_nt_beta(a, b, c, m, k, n, beta);
+    } else {
+        sgemm_nt_parallel(a, b, c, m, k, n, workers, beta);
+    }
+}
+
+/// `C = A^T @ B + beta * C` (`A` stored `[k,m]`).
+pub fn gemm_tn_into(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, beta: f32) {
+    assert_eq!(a.len(), k * m);
+    assert_eq!(b.len(), k * n);
+    assert_eq!(c.len(), m * n);
+    let flops = (m as u64).saturating_mul(n as u64).saturating_mul(k as u64);
+    // Split along output rows (`m`); TN packs A as `[k,m]` so row tiles are contiguous in C.
+    let workers = parallel_workers(m, flops);
+    if workers <= 1 {
+        sgemm_tn_beta(a, b, c, m, k, n, beta);
+    } else {
+        sgemm_tn_parallel(a, b, c, m, k, n, workers, beta);
+    }
+}
+
+/// Recycle a GEMM output buffer when the caller no longer needs it.
+pub fn recycle_gemm_buf(buf: Vec<f32>) {
+    crate::bufpool::recycle_f32(buf);
+}
+
+#[inline]
+fn sgemm_nn_beta(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, beta: f32) {
+    unsafe {
+        sgemm(
+            m,
+            k,
+            n,
+            1.0,
+            a.as_ptr(),
+            k as isize,
+            1,
+            b.as_ptr(),
+            n as isize,
+            1,
+            beta,
+            c.as_mut_ptr(),
+            n as isize,
+            1,
+        );
+    }
+}
+
+#[inline]
+fn sgemm_nt_beta(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, beta: f32) {
+    unsafe {
+        sgemm(
+            m,
+            k,
+            n,
+            1.0,
+            a.as_ptr(),
+            k as isize,
+            1,
+            b.as_ptr(),
+            1,
+            k as isize,
+            beta,
+            c.as_mut_ptr(),
+            n as isize,
+            1,
+        );
+    }
+}
+
+#[inline]
+fn sgemm_tn_beta(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, beta: f32) {
+    unsafe {
+        sgemm(
+            m,
+            k,
+            n,
+            1.0,
+            a.as_ptr(),
+            1,
+            m as isize,
+            b.as_ptr(),
+            n as isize,
+            1,
+            beta,
+            c.as_mut_ptr(),
+            n as isize,
+            1,
+        );
+    }
+}
+
+fn sgemm_nn_parallel(
     a: &[f32],
     b: &[f32],
     c: &mut [f32],
     m: usize,
     k: usize,
     n: usize,
-    isa: Isa,
+    workers: usize,
+    beta: f32,
 ) {
-    let workers = thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(1)
-        .min(m / MR)
-        .max(1);
-    if workers <= 1 {
-        gemm_bpanel(a, b, c, m, k, n, isa);
-        return;
-    }
     let chunk = ((m + workers - 1) / workers).max(MR);
-    thread::scope(|scope| {
-        let mut rest = &mut c[..];
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let mut ranges = Vec::with_capacity(workers);
         let mut row0 = 0usize;
-        for _ in 0..workers {
-            if row0 >= m {
-                break;
-            }
+        while row0 < m {
             let rows = chunk.min(m - row0);
-            let (part, next) = rest.split_at_mut(rows * n);
-            let a_rows = &a[row0 * k..(row0 + rows) * k];
-            scope.spawn(move || {
-                gemm_bpanel(a_rows, b, part, rows, k, n, isa);
-            });
-            rest = next;
+            ranges.push((row0, rows));
             row0 += rows;
         }
-    });
-}
-
-fn gemm_bpanel_rows(
-    a: &[f32],
-    b_panel: &[f32],
-    c: &mut [f32],
-    i0: usize,
-    m_rows: usize,
-    k: usize,
-    n: usize,
-    j: usize,
-    isa: Isa,
-) {
-    let mut i = i0;
-    let i_end = i0 + m_rows;
-    while i + MR <= i_end {
-        match isa {
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Isa::Avx2Fma => unsafe {
-                microkernel_4x8_avx2(a, b_panel, c, i, j, k, n);
-            },
-            Isa::Scalar => microkernel_4x8_scalar(a, b_panel, c, i, j, k, n),
-        }
-        i += MR;
+        let c_addr = c.as_mut_ptr() as usize;
+        ranges.into_par_iter().for_each(|(row0, rows)| {
+            let part = unsafe {
+                std::slice::from_raw_parts_mut((c_addr as *mut f32).add(row0 * n), rows * n)
+            };
+            let a_rows = &a[row0 * k..(row0 + rows) * k];
+            sgemm_nn_beta(a_rows, b, part, rows, k, n, beta);
+        });
+        return;
     }
-    while i < i_end {
-        for jj in 0..NR {
-            let mut s = c[i * n + j + jj];
-            for p in 0..k {
-                s += a[i * k + p] * b_panel[p * NR + jj];
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = beta;
+        std::thread::scope(|scope| {
+            let mut rest = &mut c[..];
+            let mut row0 = 0usize;
+            for _ in 0..workers {
+                if row0 >= m {
+                    break;
+                }
+                let rows = chunk.min(m - row0);
+                let (part, next) = rest.split_at_mut(rows * n);
+                let a_rows = &a[row0 * k..(row0 + rows) * k];
+                scope.spawn(move || sgemm_nn_beta(a_rows, b, part, rows, k, n, beta));
+                rest = next;
+                row0 += rows;
             }
-            c[i * n + j + jj] = s;
-        }
-        i += 1;
+        });
     }
 }
 
-fn microkernel_4x8_scalar(
+fn sgemm_nt_parallel(
     a: &[f32],
-    b_panel: &[f32],
+    b: &[f32],
     c: &mut [f32],
-    i: usize,
-    j: usize,
+    m: usize,
     k: usize,
     n: usize,
+    workers: usize,
+    beta: f32,
 ) {
-    let mut acc = [[0.0f32; NR]; MR];
-    for p in 0..k {
-        let base = p * NR;
-        let b0 = b_panel[base];
-        let b1 = b_panel[base + 1];
-        let b2 = b_panel[base + 2];
-        let b3 = b_panel[base + 3];
-        let b4 = b_panel[base + 4];
-        let b5 = b_panel[base + 5];
-        let b6 = b_panel[base + 6];
-        let b7 = b_panel[base + 7];
-        for r in 0..MR {
-            let ar = a[(i + r) * k + p];
-            acc[r][0] += ar * b0;
-            acc[r][1] += ar * b1;
-            acc[r][2] += ar * b2;
-            acc[r][3] += ar * b3;
-            acc[r][4] += ar * b4;
-            acc[r][5] += ar * b5;
-            acc[r][6] += ar * b6;
-            acc[r][7] += ar * b7;
+    let chunk = ((m + workers - 1) / workers).max(MR);
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let mut ranges = Vec::with_capacity(workers);
+        let mut row0 = 0usize;
+        while row0 < m {
+            let rows = chunk.min(m - row0);
+            ranges.push((row0, rows));
+            row0 += rows;
         }
+        let c_addr = c.as_mut_ptr() as usize;
+        ranges.into_par_iter().for_each(|(row0, rows)| {
+            let part = unsafe {
+                std::slice::from_raw_parts_mut((c_addr as *mut f32).add(row0 * n), rows * n)
+            };
+            let a_rows = &a[row0 * k..(row0 + rows) * k];
+            sgemm_nt_beta(a_rows, b, part, rows, k, n, beta);
+        });
+        return;
     }
-    for r in 0..MR {
-        let row = &mut c[(i + r) * n + j..(i + r) * n + j + NR];
-        for t in 0..NR {
-            row[t] += acc[r][t];
-        }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = beta;
+        std::thread::scope(|scope| {
+            let mut rest = &mut c[..];
+            let mut row0 = 0usize;
+            for _ in 0..workers {
+                if row0 >= m {
+                    break;
+                }
+                let rows = chunk.min(m - row0);
+                let (part, next) = rest.split_at_mut(rows * n);
+                let a_rows = &a[row0 * k..(row0 + rows) * k];
+                scope.spawn(move || sgemm_nt_beta(a_rows, b, part, rows, k, n, beta));
+                rest = next;
+                row0 += rows;
+            }
+        });
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn microkernel_4x8_avx2(
+fn sgemm_tn_parallel(
     a: &[f32],
-    b_panel: &[f32],
+    b: &[f32],
     c: &mut [f32],
-    i: usize,
-    j: usize,
+    m: usize,
     k: usize,
     n: usize,
+    workers: usize,
+    beta: f32,
 ) {
-    #[cfg(target_arch = "x86")]
-    use std::arch::x86::*;
-    #[cfg(target_arch = "x86_64")]
-    use std::arch::x86_64::*;
-
-    let mut c0 = _mm256_setzero_ps();
-    let mut c1 = _mm256_setzero_ps();
-    let mut c2 = _mm256_setzero_ps();
-    let mut c3 = _mm256_setzero_ps();
-
-    let a0 = a.as_ptr().add(i * k);
-    let a1 = a.as_ptr().add((i + 1) * k);
-    let a2 = a.as_ptr().add((i + 2) * k);
-    let a3 = a.as_ptr().add((i + 3) * k);
-    let bp = b_panel.as_ptr();
-
-    for p in 0..k {
-        let bv = _mm256_loadu_ps(bp.add(p * NR));
-        c0 = _mm256_fmadd_ps(_mm256_broadcast_ss(&*a0.add(p)), bv, c0);
-        c1 = _mm256_fmadd_ps(_mm256_broadcast_ss(&*a1.add(p)), bv, c1);
-        c2 = _mm256_fmadd_ps(_mm256_broadcast_ss(&*a2.add(p)), bv, c2);
-        c3 = _mm256_fmadd_ps(_mm256_broadcast_ss(&*a3.add(p)), bv, c3);
+    // A is `[k,m]` column-major-ish for rows of A^T; each output row `i` uses A[:, i].
+    let chunk = ((m + workers - 1) / workers).max(MR);
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let mut ranges = Vec::with_capacity(workers);
+        let mut row0 = 0usize;
+        while row0 < m {
+            let rows = chunk.min(m - row0);
+            ranges.push((row0, rows));
+            row0 += rows;
+        }
+        let c_addr = c.as_mut_ptr() as usize;
+        let a_addr = a.as_ptr() as usize;
+        ranges.into_par_iter().for_each(|(row0, rows)| {
+            let part = unsafe {
+                std::slice::from_raw_parts_mut((c_addr as *mut f32).add(row0 * n), rows * n)
+            };
+            unsafe {
+                sgemm(
+                    rows,
+                    k,
+                    n,
+                    1.0,
+                    (a_addr as *const f32).add(row0),
+                    1,
+                    m as isize,
+                    b.as_ptr(),
+                    n as isize,
+                    1,
+                    beta,
+                    part.as_mut_ptr(),
+                    n as isize,
+                    1,
+                );
+            }
+        });
+        return;
     }
-
-    let cp = c.as_mut_ptr();
-    _mm256_storeu_ps(cp.add(i * n + j), _mm256_add_ps(_mm256_loadu_ps(cp.add(i * n + j)), c0));
-    _mm256_storeu_ps(
-        cp.add((i + 1) * n + j),
-        _mm256_add_ps(_mm256_loadu_ps(cp.add((i + 1) * n + j)), c1),
-    );
-    _mm256_storeu_ps(
-        cp.add((i + 2) * n + j),
-        _mm256_add_ps(_mm256_loadu_ps(cp.add((i + 2) * n + j)), c2),
-    );
-    _mm256_storeu_ps(
-        cp.add((i + 3) * n + j),
-        _mm256_add_ps(_mm256_loadu_ps(cp.add((i + 3) * n + j)), c3),
-    );
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = (workers, chunk, beta);
+        sgemm_tn_beta(a, b, c, m, k, n, beta);
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +337,33 @@ mod tests {
         c
     }
 
+    fn naive_nt(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut c = vec![0.0; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut s = 0.0f32;
+                for p in 0..k {
+                    s += a[i * k + p] * b[j * k + p];
+                }
+                c[i * n + j] = s;
+            }
+        }
+        c
+    }
+
+    fn naive_tn(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut c = vec![0.0; m * n];
+        for i in 0..m {
+            for p in 0..k {
+                let av = a[p * m + i];
+                for j in 0..n {
+                    c[i * n + j] += av * b[p * n + j];
+                }
+            }
+        }
+        c
+    }
+
     #[test]
     fn gemm_matches_naive() {
         for &(m, k, n) in &[(3, 4, 5), (16, 16, 16), (64, 32, 48), (65, 17, 19)] {
@@ -257,6 +375,49 @@ mod tests {
                 let tol = 1e-3 * e.abs().max(1.0);
                 assert!((g - e).abs() < tol, "{g} vs {e} shape=({m},{k},{n})");
             }
+        }
+    }
+
+    #[test]
+    fn gemm_nt_matches_naive() {
+        for &(m, k, n) in &[(3, 4, 5), (16, 16, 16), (128, 64, 32), (65, 17, 19)] {
+            let a: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.01 - 0.5).collect();
+            let b: Vec<f32> = (0..n * k).map(|i| (i as f32) * 0.02 - 0.3).collect();
+            let got = gemm_f32_nt(&a, &b, m, k, n);
+            let exp = naive_nt(&a, &b, m, k, n);
+            for (g, e) in got.iter().zip(exp.iter()) {
+                let tol = 1e-3 * e.abs().max(1.0);
+                assert!((g - e).abs() < tol, "{g} vs {e} nt=({m},{k},{n})");
+            }
+        }
+    }
+
+    #[test]
+    fn gemm_tn_matches_naive() {
+        for &(m, k, n) in &[(3, 4, 5), (16, 16, 16), (128, 64, 32), (65, 17, 19)] {
+            let a: Vec<f32> = (0..k * m).map(|i| (i as f32) * 0.01 - 0.5).collect();
+            let b: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.02 - 0.3).collect();
+            let got = gemm_f32_tn(&a, &b, m, k, n);
+            let exp = naive_tn(&a, &b, m, k, n);
+            for (g, e) in got.iter().zip(exp.iter()) {
+                let tol = 1e-3 * e.abs().max(1.0);
+                assert!((g - e).abs() < tol, "{g} vs {e} tn=({m},{k},{n})");
+            }
+        }
+    }
+
+    #[test]
+    fn gemm_acc_beta() {
+        let m = 8usize;
+        let k = 8usize;
+        let n = 8usize;
+        let a: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.01).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.02).collect();
+        let base = gemm_f32(&a, &b, m, k, n);
+        let mut c = base.clone();
+        gemm_nn_into(&a, &b, &mut c, m, k, n, 1.0);
+        for i in 0..c.len() {
+            assert!((c[i] - 2.0 * base[i]).abs() < 1e-4);
         }
     }
 }

@@ -50,12 +50,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "parity_runner"
+name = "mnist_mlp_rtorch"
 version = "0.1.0"
 dependencies = [
- "rnumpy",
- "rpandas",
- "rscipy",
  "rtorch",
 ]
 
@@ -91,13 +88,6 @@ version = "0.1.0"
 
 [[package]]
 name = "rpandas"
-version = "0.1.0"
-dependencies = [
- "rnumpy",
-]
-
-[[package]]
-name = "rscipy"
 version = "0.1.0"
 dependencies = [
  "rnumpy",

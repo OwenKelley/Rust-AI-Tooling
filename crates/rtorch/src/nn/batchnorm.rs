@@ -214,13 +214,19 @@ impl BatchNorm2d {
 impl Module for BatchNorm2d {
     fn forward(&self, input: &Tensor) -> Tensor {
         assert_eq!(input.ndim(), 4, "BatchNorm2d: NCHW only");
+        let input = input.as_contiguous();
         let c = self.num_features;
         let xi = input.inner.borrow();
         let (n, cin, h, w) = (xi.shape[0], xi.shape[1], xi.shape[2], xi.shape[3]);
         assert_eq!(cin, c);
         let m = n * h * w;
-        let wt = self.weight.inner.borrow();
-        let b = self.bias.inner.borrow();
+        let xd = xi.data_slice();
+        let wt = self.weight.as_contiguous();
+        let bt = self.bias.as_contiguous();
+        let wb = wt.inner.borrow();
+        let bb = bt.inner.borrow();
+        let wd = wb.data_slice();
+        let bd = bb.data_slice();
         let mut mean = vec![0.0f32; c];
         let mut rstd = vec![0.0f32; c];
         if self.training {
@@ -229,7 +235,7 @@ impl Module for BatchNorm2d {
                 for ni in 0..n {
                     for y in 0..h {
                         for x in 0..w {
-                            s += xi.dense_data()[((ni * c + j) * h + y) * w + x];
+                            s += xd[((ni * c + j) * h + y) * w + x];
                         }
                     }
                 }
@@ -238,7 +244,7 @@ impl Module for BatchNorm2d {
                 for ni in 0..n {
                     for y in 0..h {
                         for x in 0..w {
-                            let v = xi.dense_data()[((ni * c + j) * h + y) * w + x] - mean[j];
+                            let v = xd[((ni * c + j) * h + y) * w + x] - mean[j];
                             var += v * v;
                         }
                     }
@@ -259,7 +265,7 @@ impl Module for BatchNorm2d {
                 for ni in 0..n {
                     for y in 0..h {
                         for x in 0..w {
-                            let v = xi.dense_data()[((ni * c + j) * h + y) * w + x] - mean[j];
+                            let v = xd[((ni * c + j) * h + y) * w + x] - mean[j];
                             var += v * v;
                         }
                     }
@@ -282,13 +288,16 @@ impl Module for BatchNorm2d {
                 for y in 0..h {
                     for x in 0..w {
                         let ii = ((ni * c + j) * h + y) * w + x;
-                        let xhat = (xi.dense_data()[ii] - mean[j]) * rstd[j];
-                        data[ii] = xhat * wt.dense_data()[j] + b.dense_data()[j];
+                        let xhat = (xd[ii] - mean[j]) * rstd[j];
+                        data[ii] = xhat * wd[j] + bd[j];
                     }
                 }
             }
         }
-        drop((xi, wt, b));
+        drop(xd);
+        drop(wd);
+        drop(bd);
+        drop((xi, wb, bb));
         let rg = is_grad_enabled()
             && (input.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad());
         let gf = if rg {

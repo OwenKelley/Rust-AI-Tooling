@@ -14,18 +14,43 @@ pub fn from_numpy(a: &NdArray) -> Tensor {
 
 /// `torch.from_numpy` for contiguous f32 `rnumpy::NdArrayF32` (copies storage).
 pub fn from_numpy_f32(a: &NdArrayF32) -> Tensor {
-    Tensor::from_vec(a.as_slice().to_vec(), a.shape(), false)
+    let sl = a.as_slice();
+    let mut data = Vec::with_capacity(sl.len());
+    unsafe {
+        data.set_len(sl.len());
+    }
+    data.copy_from_slice(sl);
+    Tensor::from_vec(data, a.shape(), false)
+}
+
+/// `torch.from_numpy` taking ownership of an `NdArrayF32` (no second copy).
+pub fn from_numpy_f32_owned(a: NdArrayF32) -> Tensor {
+    let (data, shape) = a.into_parts();
+    Tensor::from_vec(data, &shape, false)
 }
 
 /// `tensor.numpy()` — returns a contiguous f64 `NdArray` (copy + cast).
 pub fn to_numpy(t: &Tensor) -> NdArray {
-    let data: Vec<f64> = t.data().iter().map(|&x| x as f64).collect();
-    NdArray::from_shape_vec(&t.shape(), data)
+    t.with_data(|sl| {
+        let mut data = Vec::with_capacity(sl.len());
+        for &x in sl {
+            data.push(x as f64);
+        }
+        NdArray::from_shape_vec(&t.shape(), data)
+    })
 }
 
 /// `tensor.numpy()` as f32 `NdArrayF32` (copy).
 pub fn to_numpy_f32(t: &Tensor) -> NdArrayF32 {
-    NdArrayF32::from_shape_vec(&t.shape(), t.data())
+    let shape = t.shape();
+    t.with_data(|sl| {
+        let mut data = Vec::with_capacity(sl.len());
+        unsafe {
+            data.set_len(sl.len());
+        }
+        data.copy_from_slice(sl);
+        NdArrayF32::from_shape_vec(&shape, data)
+    })
 }
 
 /// `torch.tensor(df.values)` for a numeric `DataFrame` (row-major `f32` copy).

@@ -1,42 +1,39 @@
 //! `torch.nn.functional` entry points.
 
+use std::rc::Rc;
+
 use crate::autograd::GradFn;
 use crate::context::is_grad_enabled;
 use crate::device::Device;
 use crate::dtype::Dtype;
-use crate::ops::{matmul_raw, mean, mul, sub, transpose_data};
+use crate::gemm::gemm_f32_nt;
+use crate::ops::{mean, mul, sub};
 use crate::tensor::{Tensor, TensorInner};
 
 fn wrap(data: Vec<f32>, shape: &[usize], requires_grad: bool, grad_fn: Option<GradFn>) -> Tensor {
-    let n = if shape.is_empty() {
-        1
-    } else {
-        shape.iter().product()
-    };
     Tensor::from_inner(TensorInner::new_contiguous(
         data,
         shape.to_vec(),
         Device::Cpu,
         Dtype::Float32,
         requires_grad,
-        if requires_grad {
-            Some(vec![0.0; n])
-        } else {
-            None
-        },
+        // Allocate on first accumulate — avoids zero-filling every activation.
+        None,
         grad_fn,
     ))
 }
 
 /// `F.relu`
 pub fn relu(x: &Tensor) -> Tensor {
+    let x = x.as_contiguous();
     let rg = is_grad_enabled() && x.requires_grad();
     let (data, mask, shape) = {
         let xi = x.inner.borrow();
         let n = xi.numel();
         let mut data = vec![0.0f32; n];
         let mut mask = if rg { vec![false; n] } else { Vec::new() };
-        relu_kernel(&xi.dense_data(), data.as_mut_slice(), if rg { Some(&mut mask) } else { None });
+        let xd = xi.data_slice();
+        relu_kernel(&xd, data.as_mut_slice(), if rg { Some(&mut mask) } else { None });
         (data, mask, xi.shape.clone())
     };
     let gf = if rg {
@@ -52,13 +49,17 @@ pub fn relu(x: &Tensor) -> Tensor {
 
 /// `F.leaky_relu(x, negative_slope)`
 pub fn leaky_relu(x: &Tensor, negative_slope: f32) -> Tensor {
+    let x = x.as_contiguous();
     let xi = x.inner.borrow();
     let rg = is_grad_enabled() && x.requires_grad();
-    let data: Vec<f32> = xi
-        .dense_data().iter()
-        .map(|&v| if v >= 0.0 { v } else { v * negative_slope })
-        .collect();
+    let xd = xi.data_slice();
+    let mut data = vec![0.0f32; xd.len()];
+    for i in 0..xd.len() {
+        let v = xd[i];
+        data[i] = if v >= 0.0 { v } else { v * negative_slope };
+    }
     let shape = xi.shape.clone();
+    drop(xd);
     drop(xi);
     let gf = if rg {
         Some(GradFn::LeakyRelu {
@@ -267,24 +268,27 @@ mod sigmoid_tests {
 
 /// `F.linear(input, weight, bias)` — input (N,In), weight (Out,In), bias (Out,).
 pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
-    let wt = transpose_data(weight);
-    let y = matmul_raw(input, &wt);
-    if let Some(b) = bias {
-        let bi = b.inner.borrow();
-        assert_eq!(bi.shape.len(), 1);
-        let mut yi = y.inner.borrow_mut();
-        assert_eq!(bi.shape[0], yi.shape[1]);
-        let n = yi.shape[0];
-        let out_f = yi.shape[1];
-        let bd = &bi.dense_data();
-        let yd = &mut *yi.data_mut_dense();
-        for i in 0..n {
-            let row = &mut yd[i * out_f..(i + 1) * out_f];
-            for j in 0..out_f {
-                row[j] += bd[j];
-            }
+    let input = input.as_contiguous();
+    let weight = weight.as_contiguous();
+    let (batch, out_f, data) = {
+        let ii = input.inner.borrow();
+        let wi = weight.inner.borrow();
+        assert_eq!(ii.shape.len(), 2, "linear: input 2D");
+        assert_eq!(wi.shape.len(), 2, "linear: weight 2D");
+        let batch = ii.shape[0];
+        let in_f = ii.shape[1];
+        let out_f = wi.shape[0];
+        assert_eq!(wi.shape[1], in_f, "linear: in_features");
+        let mut data = gemm_f32_nt(&ii.data_slice(), &wi.data_slice(), batch, in_f, out_f);
+        if let Some(b) = bias {
+            let b = b.as_contiguous();
+            let bi = b.inner.borrow();
+            assert_eq!(bi.shape, &[out_f], "linear: bias shape");
+            crate::cpu_kernels::bias_add_rows(&mut data, &bi.data_slice(), batch, out_f);
         }
-    }
+        (batch, out_f, data)
+    };
+    let y = Tensor::from_vec(data, &[batch, out_f], false);
     let rg = is_grad_enabled()
         && (input.requires_grad()
             || weight.requires_grad()
@@ -292,52 +296,72 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Tensor 
     if rg {
         let mut yi = y.inner.borrow_mut();
         yi.requires_grad = true;
-        yi.grad = Some(vec![0.0; yi.numel()]);
-        yi.grad_fn = Some(GradFn::Linear {
+        yi.grad = None;
+        yi.grad_fn = Some(Rc::new(GradFn::Linear {
             input: input.clone(),
             weight: weight.clone(),
             bias: bias.cloned(),
-        });
+        }));
     }
     y
 }
 
 /// Fused `relu(linear(input, weight, bias))`.
 ///
-/// With grads enabled, equivalent to `relu(linear(...))`. With grads disabled,
-/// runs matmul + bias + ReLU without an intermediate Tensor.
+/// With grads enabled, attaches a single [`GradFn::FusedLinearRelu`] node (one
+/// activation buffer + ReLU mask) instead of separate Linear and ReLU nodes.
 pub fn fused_linear_relu(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
+    let input = input.as_contiguous();
+    let weight = weight.as_contiguous();
     let rg = is_grad_enabled()
         && (input.requires_grad()
             || weight.requires_grad()
             || bias.map(|b| b.requires_grad()).unwrap_or(false));
-    if rg {
-        return relu(&linear(input, weight, bias));
-    }
-    let wt = transpose_data(weight);
-    let y = matmul_raw(input, &wt);
-    {
-        let mut yi = y.inner.borrow_mut();
-        let n = yi.shape[0];
-        let out_f = yi.shape[1];
-        let yd = &mut *yi.data_mut_dense();
-        if let Some(b) = bias {
-            let bd = b.inner.borrow().dense_data();
-            assert_eq!(bd.len(), out_f);
-            for i in 0..n {
-                let row = &mut yd[i * out_f..(i + 1) * out_f];
-                for j in 0..out_f {
-                    let v = row[j] + bd[j];
-                    row[j] = if v > 0.0 { v } else { 0.0 };
-                }
-            }
+    let (batch, out_f, data, mask) = {
+        let ii = input.inner.borrow();
+        let wi = weight.inner.borrow();
+        let batch = ii.shape[0];
+        let in_f = ii.shape[1];
+        let out_f = wi.shape[0];
+        assert_eq!(wi.shape[1], in_f);
+        let mut data = gemm_f32_nt(&ii.data_slice(), &wi.data_slice(), batch, in_f, out_f);
+        let mut mask = if rg {
+            vec![false; batch * out_f]
         } else {
-            for v in yd.iter_mut() {
-                if *v < 0.0 {
-                    *v = 0.0;
-                }
-            }
+            Vec::new()
+        };
+        let mask_opt = if rg {
+            Some(mask.as_mut_slice())
+        } else {
+            None
+        };
+        if let Some(b) = bias {
+            let b = b.as_contiguous();
+            let bi = b.inner.borrow();
+            assert_eq!(bi.shape, &[out_f]);
+            crate::cpu_kernels::bias_relu_rows(
+                &mut data,
+                Some(&bi.data_slice()),
+                mask_opt,
+                batch,
+                out_f,
+            );
+        } else {
+            crate::cpu_kernels::bias_relu_rows(&mut data, None, mask_opt, batch, out_f);
         }
+        (batch, out_f, data, mask)
+    };
+    let y = Tensor::from_vec(data, &[batch, out_f], false);
+    if rg {
+        let mut yi = y.inner.borrow_mut();
+        yi.requires_grad = true;
+        yi.grad = None;
+        yi.grad_fn = Some(Rc::new(GradFn::FusedLinearRelu {
+            input: input.clone(),
+            weight: weight.clone(),
+            bias: bias.cloned(),
+            mask,
+        }));
     }
     y
 }
@@ -352,13 +376,15 @@ pub fn mse_loss(input: &Tensor, target: &Tensor) -> Tensor {
 /// Softmax along the last dimension for 2D `(N, C)`.
 pub fn softmax(x: &Tensor) -> Tensor {
     assert_eq!(x.ndim(), 2, "softmax: 2D (N,C) only");
+    let x = x.as_contiguous();
     let xi = x.inner.borrow();
     let n = xi.shape[0];
     let c = xi.shape[1];
+    let xd = xi.data_slice();
     let mut data = vec![0.0f32; n * c];
     let mut row_exp = vec![0.0f32; c];
     for i in 0..n {
-        let row = &xi.dense_data()[i * c..(i + 1) * c];
+        let row = &xd[i * c..(i + 1) * c];
         let mut m = row[0];
         for &v in &row[1..] {
             if v > m {
@@ -381,6 +407,7 @@ pub fn softmax(x: &Tensor) -> Tensor {
     }
     let shape = xi.shape.clone();
     let rg = is_grad_enabled() && x.requires_grad();
+    drop(xd);
     drop(xi);
     let gf = if rg {
         Some(GradFn::Softmax {
@@ -396,14 +423,16 @@ pub fn softmax(x: &Tensor) -> Tensor {
 /// Log-softmax along last dim for 2D `(N, C)`.
 pub fn log_softmax(x: &Tensor) -> Tensor {
     assert_eq!(x.ndim(), 2, "log_softmax: 2D (N,C) only");
+    let x = x.as_contiguous();
     let xi = x.inner.borrow();
     let n = xi.shape[0];
     let c = xi.shape[1];
+    let xd = xi.data_slice();
     let mut data = vec![0.0f32; n * c];
     let mut shifted = vec![0.0f32; c];
     let mut tmp = vec![0.0f32; c];
     for i in 0..n {
-        let row = &xi.dense_data()[i * c..(i + 1) * c];
+        let row = &xd[i * c..(i + 1) * c];
         let mut m = row[0];
         for &v in &row[1..] {
             if v > m {
@@ -425,6 +454,7 @@ pub fn log_softmax(x: &Tensor) -> Tensor {
     }
     let shape = xi.shape.clone();
     let rg = is_grad_enabled() && x.requires_grad();
+    drop(xd);
     drop(xi);
     let gf = if rg {
         Some(GradFn::LogSoftmax {
@@ -440,6 +470,7 @@ pub fn log_softmax(x: &Tensor) -> Tensor {
 /// `F.cross_entropy(logits, target)` — mean reduction; `target` is class indices.
 pub fn cross_entropy(logits: &Tensor, target: &[usize]) -> Tensor {
     assert_eq!(logits.ndim(), 2, "cross_entropy: logits (N,C)");
+    let logits = logits.as_contiguous();
     let xi = logits.inner.borrow();
     let n = xi.shape[0];
     let c = xi.shape[1];
@@ -447,35 +478,69 @@ pub fn cross_entropy(logits: &Tensor, target: &[usize]) -> Tensor {
     for &t in target {
         assert!(t < c, "cross_entropy: class {t} >= {c}");
     }
+    let xd = xi.data_slice();
     let mut probs = vec![0.0f32; n * c];
-    let mut loss = 0.0f32;
-    for i in 0..n {
-        let row = &xi.dense_data()[i * c..(i + 1) * c];
-        let mut m = row[0];
-        for &v in row.iter().skip(1) {
-            if v > m {
-                m = v;
-            }
-        }
-        let mut sum = 0.0f32;
-        for j in 0..c {
-            let e = (row[j] - m).exp();
-            probs[i * c + j] = e;
-            sum += e;
-        }
-        let inv = 1.0 / sum;
-        for j in 0..c {
-            probs[i * c + j] *= inv;
-        }
-        let p = probs[i * c + target[i]].max(1e-12);
-        loss -= p.ln();
-    }
-    loss /= n as f32;
+    let loss = crate::cpu_kernels::cross_entropy_mean(&xd, target, &mut probs, n, c);
     let rg = is_grad_enabled() && logits.requires_grad();
+    drop(xd);
     drop(xi);
     let gf = if rg {
         Some(GradFn::CrossEntropy {
             logits: logits.clone(),
+            probs,
+            target: target.to_vec(),
+            n,
+            c,
+        })
+    } else {
+        None
+    };
+    wrap(vec![loss], &[], rg, gf)
+}
+
+/// Fused `cross_entropy(linear(input, weight, bias), target)` as one autograd node.
+pub fn linear_cross_entropy(
+    input: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    target: &[usize],
+) -> Tensor {
+    let input = input.as_contiguous();
+    let weight = weight.as_contiguous();
+    let (n, c, loss, probs) = {
+        let ii = input.inner.borrow();
+        let wi = weight.inner.borrow();
+        assert_eq!(ii.shape.len(), 2);
+        assert_eq!(wi.shape.len(), 2);
+        let n = ii.shape[0];
+        let in_f = ii.shape[1];
+        let c = wi.shape[0];
+        assert_eq!(wi.shape[1], in_f);
+        assert_eq!(target.len(), n);
+        for &t in target {
+            assert!(t < c);
+        }
+        let mut logits = gemm_f32_nt(&ii.data_slice(), &wi.data_slice(), n, in_f, c);
+        if let Some(b) = bias {
+            let b = b.as_contiguous();
+            let bi = b.inner.borrow();
+            assert_eq!(bi.shape, &[c]);
+            crate::cpu_kernels::bias_add_rows(&mut logits, &bi.data_slice(), n, c);
+        }
+        let mut probs = vec![0.0f32; n * c];
+        let loss = crate::cpu_kernels::cross_entropy_mean(&logits, target, &mut probs, n, c);
+        crate::gemm::recycle_gemm_buf(logits);
+        (n, c, loss, probs)
+    };
+    let rg = is_grad_enabled()
+        && (input.requires_grad()
+            || weight.requires_grad()
+            || bias.map(|b| b.requires_grad()).unwrap_or(false));
+    let gf = if rg {
+        Some(GradFn::FusedLinearCrossEntropy {
+            input: input.clone(),
+            weight: weight.clone(),
+            bias: bias.cloned(),
             probs,
             target: target.to_vec(),
             n,

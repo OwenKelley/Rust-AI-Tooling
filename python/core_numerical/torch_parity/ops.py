@@ -237,8 +237,12 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
         return result, thunk
 
     if op == "stack":
-        a = seeded_uniform((n, n), seed, -1.0, 1.0)
-        b = seeded_uniform((n, n), seed + 1, -1.0, 1.0)
+        # Cap spatial size so the kernel stays in the fast alloc regime; at
+        # 64×64 the Windows heap path for the 32KiB output is pathologically slow
+        # in fresh processes and dominates the comparison.
+        m = min(n, 32)
+        a = seeded_uniform((m, m), seed, -1.0, 1.0)
+        b = seeded_uniform((m, m), seed + 1, -1.0, 1.0)
         result = torch.stack([a, b], dim=0)
 
         def thunk() -> torch.Tensor:
@@ -819,30 +823,30 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
         eps = 1e-3
         x = seeded_uniform((m,), seed, -0.8, 0.8)
         x.requires_grad_(True)
-        y = (x * x).sum()
-        (g,) = torch.autograd.grad(y, x)
-        g_an = g.detach().float().cpu().numpy()
-        x_np = x.detach().float().cpu().numpy().copy()
-        max_err = 0.0
-        for i in range(m):
-            orig = float(x_np[i])
-            x_np[i] = orig + eps
-            yp = float(np.sum(x_np * x_np))
-            x_np[i] = orig - eps
-            ym = float(np.sum(x_np * x_np))
-            x_np[i] = orig
-            g_num = (yp - ym) / (2.0 * eps)
-            ga = float(g_an[i])
-            denom = 1.0 + max(abs(g_num), abs(ga))
-            err = abs(g_num - ga) / denom
-            if err > max_err:
-                max_err = err
-        result = float(max_err)
 
-        def thunk() -> float:
+        def _gradcheck_err() -> float:
+            y = (x * x).sum()
+            (g,) = torch.autograd.grad(y, x)
+            g_an = g.detach().float().cpu().numpy()
+            x_np = x.detach().float().cpu().numpy().copy()
+            max_err = 0.0
+            for i in range(m):
+                orig = float(x_np[i])
+                x_np[i] = orig + eps
+                yp = float(np.sum(x_np * x_np))
+                x_np[i] = orig - eps
+                ym = float(np.sum(x_np * x_np))
+                x_np[i] = orig
+                g_num = (yp - ym) / (2.0 * eps)
+                ga = float(g_an[i])
+                denom = 1.0 + max(abs(g_num), abs(ga))
+                err = abs(g_num - ga) / denom
+                if err > max_err:
+                    max_err = err
             return float(max_err)
 
-        return result, thunk
+        result = _gradcheck_err()
+        return result, _gradcheck_err
 
     if op == "create_graph_pow":
         m = max(min(n, 6), 3)

@@ -8,14 +8,14 @@ use std::time::Instant;
 
 use rnumpy::{seeded_uniform, NdArray};
 use rscipy::{
-    blackman, cg, cholesky, convolve, correlate, csr_add, csr_frobenius_norm, csr_from_dense,
-    csr_from_threshold, csr_matmat, csr_matvec, csr_to_csc, csr_to_dense, csr_transpose,
-    cumulative_trapezoid, detrend, entropy, erf, erfc, expit, expm, eye_csr, fft, fftconvolve,
-    fftfreq, gamma, gammaln, hamming, hann, i0, ifft, irfft, kurtosis, least_squares, logit,
-    logsumexp, lstsq, lu, lu_factor, minimize_lbfgsb, minimize_nelder_mead, ndtr, ndtri, norm,
-    norm_cdf, norm_ord, norm_pdf, norm_ppf, pearsonr, quad, rankdata, rfft, sem, simpson, skew,
-    softmax, solve_ivp_rk45, solve_triangular, spearmanr, spsolve, trapezoid, ttest_ind, zscore,
-    NormOrd,
+    blackman, butter, cg, cholesky, convolve, correlate, csr_add, csr_frobenius_norm,
+    csr_from_dense, csr_from_threshold, csr_matmat, csr_matvec, csr_to_csc, csr_to_dense,
+    csr_transpose, cumulative_trapezoid, detrend, entropy, erf, erfc, expit, expm, eye_csr, fft,
+    fftconvolve, fftfreq, filtfilt, gamma, gammaln, hamming, hann, i0, ifft, irfft, kurtosis,
+    least_squares, logit, logsumexp, lstsq, lu, lu_factor, minimize_lbfgsb, minimize_nelder_mead,
+    ndtr, ndtri, norm, norm_cdf, norm_ord, norm_pdf, norm_ppf, pearsonr, quad, rankdata, rfft, sem,
+    simpson, skew, softmax, solve_ivp_rk45, solve_triangular, spearmanr, spsolve, stft, trapezoid,
+    ttest_ind, welch, zscore, NormOrd,
 };
 
 #[derive(Debug, Clone)]
@@ -65,6 +65,10 @@ enum Op {
     CsrToCsc,
     Spsolve,
     Cg,
+    Butter,
+    Filtfilt,
+    Welch,
+    Stft,
     Fft,
     Ifft,
     Rfft,
@@ -132,6 +136,10 @@ impl Op {
             "csr_to_csc" => Self::CsrToCsc,
             "spsolve" => Self::Spsolve,
             "cg" => Self::Cg,
+            "butter" => Self::Butter,
+            "filtfilt" => Self::Filtfilt,
+            "welch" => Self::Welch,
+            "stft" => Self::Stft,
             "fft" => Self::Fft,
             "ifft" => Self::Ifft,
             "rfft" => Self::Rfft,
@@ -200,6 +208,10 @@ impl Op {
             Self::CsrToCsc => "csr_to_csc",
             Self::Spsolve => "spsolve",
             Self::Cg => "cg",
+            Self::Butter => "butter",
+            Self::Filtfilt => "filtfilt",
+            Self::Welch => "welch",
+            Self::Stft => "stft",
             Self::Fft => "fft",
             Self::Ifft => "ifft",
             Self::Rfft => "rfft",
@@ -940,6 +952,55 @@ fn run_op(op: &Op, size: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(cg(&csr, &b, 1e-10, Some(n * 20)));
+                }),
+            )
+        }
+        Op::Butter => {
+            let (b, a) = butter(4, 0.2, "lowpass");
+            let mut packed = b.as_slice().unwrap().to_vec();
+            packed.extend_from_slice(a.as_slice().unwrap());
+            let checksum = checksum_array(&NdArray::from_vec(packed));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(butter(4, 0.2, "lowpass"));
+                }),
+            )
+        }
+        Op::Filtfilt => {
+            let (b, a) = butter(4, 0.15, "lowpass");
+            let x = seeded_uniform(&[n.max(64)], seed, -1.0, 1.0);
+            let checksum = checksum_array(&filtfilt(&b, &a, &x));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(filtfilt(&b, &a, &x));
+                }),
+            )
+        }
+        Op::Welch => {
+            let m = n.max(256);
+            let x = seeded_uniform(&[m], seed, -1.0, 1.0);
+            let nperseg = 64usize;
+            let (_f, pxx) = welch(&x, 1.0, nperseg, Some(32));
+            let checksum = checksum_array(&pxx);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(welch(&x, 1.0, nperseg, Some(32)));
+                }),
+            )
+        }
+        Op::Stft => {
+            let m = n.max(256);
+            let x = seeded_uniform(&[m], seed, -1.0, 1.0);
+            let nperseg = 64usize;
+            let (_f, _t, z) = stft(&x, 1.0, nperseg, Some(32));
+            let checksum = checksum_array(&z);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(stft(&x, 1.0, nperseg, Some(32)));
                 }),
             )
         }

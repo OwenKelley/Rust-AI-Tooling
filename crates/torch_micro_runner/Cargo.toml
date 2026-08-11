@@ -1,0 +1,17 @@
+[package]
+name = "torch_micro_runner"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone workspace so this stays a tiny binary with stable timings
+# (the main parity_runner megabinary adds large Windows overhead on short kernels).
+[workspace]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+
+[dependencies]
+rtorch = { path = "../rtorch" }

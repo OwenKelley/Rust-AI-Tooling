@@ -127,9 +127,11 @@ pub fn avg_pool2d(input: &Tensor, kernel_size: usize, stride: usize) -> Tensor {
 /// `F.adaptive_avg_pool2d(input, output_size)` — NCHW.
 pub fn adaptive_avg_pool2d(input: &Tensor, out_h: usize, out_w: usize) -> Tensor {
     assert!(out_h > 0 && out_w > 0);
+    let input = input.as_contiguous();
     let xi = input.inner.borrow();
     assert_eq!(xi.shape.len(), 4, "adaptive_avg_pool2d: NCHW");
     let (n, c, h, w) = (xi.shape[0], xi.shape[1], xi.shape[2], xi.shape[3]);
+    let xd = xi.data_slice();
     let out_n = n * c * out_h * out_w;
     let mut data = vec![0.0f32; out_n];
     for ni in 0..n {
@@ -144,7 +146,7 @@ pub fn adaptive_avg_pool2d(input: &Tensor, out_h: usize, out_w: usize) -> Tensor
                     let mut cnt = 0usize;
                     for y in y0..y1 {
                         for x in x0..x1 {
-                            acc += xi.dense_data()[((ni * c + ci) * h + y) * w + x];
+                            acc += xd[((ni * c + ci) * h + y) * w + x];
                             cnt += 1;
                         }
                     }
@@ -154,6 +156,7 @@ pub fn adaptive_avg_pool2d(input: &Tensor, out_h: usize, out_w: usize) -> Tensor
         }
     }
     let shape = vec![n, c, out_h, out_w];
+    drop(xd);
     drop(xi);
     let rg = is_grad_enabled() && input.requires_grad();
     let gf = if rg {

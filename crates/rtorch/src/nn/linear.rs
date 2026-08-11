@@ -45,6 +45,16 @@ impl Linear {
         }
         Self { weight, bias }
     }
+
+    /// `relu(linear(x))` with a fused forward/backward tape node when grads are on.
+    pub fn forward_relu(&self, input: &Tensor) -> Tensor {
+        functional::fused_linear_relu(input, &self.weight, self.bias.as_ref())
+    }
+
+    /// `cross_entropy(linear(x), target)` with a fused tape node when grads are on.
+    pub fn forward_cross_entropy(&self, input: &Tensor, target: &[usize]) -> Tensor {
+        functional::linear_cross_entropy(input, &self.weight, self.bias.as_ref(), target)
+    }
 }
 
 impl Module for Linear {

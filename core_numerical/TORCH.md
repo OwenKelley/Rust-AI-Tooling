@@ -10,6 +10,7 @@ with correctness and speed checks against PyTorch.
 |------|------|
 | `crates/rtorch` | Tensor + autograd + `nn` / optim |
 | `crates/parity_runner` (`torch_parity_runner`) | Times an op and prints JSON |
+| `crates/torch_micro_runner` | Tiny standalone timer for short kernels (stable Windows timings) |
 | `python/core_numerical/torch_parity` | PyTorch reference + comparison harness |
 
 ## API map (v1 + Phase 2 + nn/optim slice)
@@ -68,7 +69,9 @@ pytest core_numerical/torch_parity
 ## Compare
 
 ```powershell
+$env:CARGO_TARGET_DIR = "target/parity_runner"
 cargo build -p parity_runner --bin torch_parity_runner --release
+cargo build --release --manifest-path crates/torch_micro_runner/Cargo.toml
 cd python
 python -m core_numerical.torch_parity.compare --size 64 --iters 20
 ```

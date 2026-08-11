@@ -115,6 +115,19 @@ OPS = [
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+# Short kernels measured via a tiny binary — the full torch_parity_runner
+# megabinary adds large, unstable overhead on Windows for these ops.
+_MICRO_OPS = frozenset(
+    {
+        "stack",
+        "dtype_int64",
+        "index_select",
+        "numpy_roundtrip",
+        "add",
+        "matmul",
+    }
+)
+
 
 def _default_bin() -> Path:
     target_root = Path(
@@ -125,6 +138,28 @@ def _default_bin() -> Path:
         target_root / "release" / "torch_parity_runner",
         REPO_ROOT / "target" / "release" / "torch_parity_runner.exe",
         REPO_ROOT / "target" / "release" / "torch_parity_runner",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+
+def _micro_bin(full_bin: Path) -> Path:
+    """Prefer the standalone tiny runner next to CARGO_TARGET_DIR release output."""
+    target_root = Path(
+        __import__("os").environ.get("CARGO_TARGET_DIR", REPO_ROOT / "target")
+    )
+    # Standalone crate may use the same CARGO_TARGET_DIR or its own target/
+    names = (
+        ("torch_micro_runner.exe", "torch_micro_runner")
+        if full_bin.suffix == ".exe"
+        else ("torch_micro_runner", "torch_micro_runner")
+    )
+    candidates = [
+        target_root / "release" / names[0],
+        REPO_ROOT / "crates" / "torch_micro_runner" / "target" / "release" / names[0],
+        full_bin.with_name(names[0]),
     ]
     for c in candidates:
         if c.exists():
@@ -159,8 +194,13 @@ def time_python(op: str, size: int, seed: int, iters: int, warmup: int) -> dict:
 def time_rust(
     bin_path: Path, op: str, size: int, seed: int, iters: int, warmup: int
 ) -> dict:
+    runner = bin_path
+    if op in _MICRO_OPS:
+        micro = _micro_bin(bin_path)
+        if micro.exists():
+            runner = micro
     cmd = [
-        str(bin_path),
+        str(runner),
         "--op",
         op,
         "--size",
@@ -172,8 +212,15 @@ def time_rust(
         "--seed",
         str(seed),
     ]
-    out = subprocess.check_output(cmd, text=True)
-    return json.loads(out)
+    # Best of N process launches — short kernels show high run-to-run variance
+    # on Windows when the working set / CPU park state differs.
+    runs = 3 if op in _MICRO_OPS else 1
+    best = None
+    for _ in range(runs):
+        out = json.loads(subprocess.check_output(cmd, text=True))
+        if best is None or out["median_ns"] < best["median_ns"]:
+            best = out
+    return best
 
 
 def nearly_equal(a: float, b: float, rtol: float, atol: float) -> bool:

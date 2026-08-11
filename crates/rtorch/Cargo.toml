@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 description = "PyTorch-like tensor + autograd API for Rust (1:1 mapping target)"
 
+[features]
+default = ["parallel"]
+# Reusable Rayon pool for mid/large GEMMs. Disable with `--no-default-features` for tiny embeds.
+parallel = ["dep:rayon"]
+
 [dependencies]
 rnumpy = { path = "../rnumpy" }
 rpandas = { path = "../rpandas" }
+matrixmultiply = "0.3"
+rayon = { version = "1.10", optional = true }

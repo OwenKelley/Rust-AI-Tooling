@@ -549,6 +549,11 @@ impl NdArrayF32 {
         &self.data
     }
 
+    /// Consume the array into `(data, shape)`.
+    pub fn into_parts(self) -> (Vec<f32>, Vec<usize>) {
+        (self.data, self.shape)
+    }
+
     pub fn sum(&self) -> f32 {
         self.data.iter().sum()
     }
