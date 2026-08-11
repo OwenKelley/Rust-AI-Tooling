@@ -1,4 +1,4 @@
-"""MNIST MLP train/val — PyTorch side (1:1 with rust/src/main.rs)."""
+"""MNIST MLP train/val — PyTorch reference (mirrored by rust --mode naive)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import torch.nn as nn
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
-# Match Rust Linear::new LCG-ish init is not identical; architecture/hparams are.
 HIDDEN = 128
 LR = 1e-3
 DEFAULT_EPOCHS = 25
@@ -39,7 +38,7 @@ def read_idx_labels(path: Path) -> torch.Tensor:
 
 
 def lcg_shuffle(n: int, seed: int) -> list[int]:
-    """Fisher–Yates with the same LCG as the Rust trainer."""
+    """Fisher–Yates with the same LCG as the Rust trainers."""
     idx = list(range(n))
     state = seed & 0xFFFFFFFFFFFFFFFF
     for i in range(n - 1, 0, -1):
@@ -47,13 +46,6 @@ def lcg_shuffle(n: int, seed: int) -> list[int]:
         j = (state >> 8) % (i + 1)
         idx[i], idx[j] = idx[j], idx[i]
     return idx
-
-
-def shuffle_epoch_inplace(x: torch.Tensor, y: torch.Tensor, seed: int) -> None:
-    """Apply the LCG Fisher–Yates permutation once per epoch (contiguous batches)."""
-    order = lcg_shuffle(x.shape[0], seed)
-    x.copy_(x[order])
-    y.copy_(y[order])
 
 
 class MLP(nn.Module):
@@ -70,11 +62,6 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
-    pred = logits.argmax(dim=1)
-    return (pred == y).float().mean().item()
-
-
 def run_epoch_train(
     model: MLP,
     opt: torch.optim.Optimizer,
@@ -85,14 +72,13 @@ def run_epoch_train(
     seed: int,
 ) -> float:
     model.train()
-    shuffle_epoch_inplace(x, y, seed)
-    n = x.shape[0]
+    order = lcg_shuffle(x.shape[0], seed)
     total_loss = 0.0
     n_batches = 0
-    for start in range(0, n, batch_size):
-        end = min(start + batch_size, n)
-        xb = x[start:end]
-        yb = y[start:end]
+    for start in range(0, len(order), batch_size):
+        batch_idx = order[start : start + batch_size]
+        xb = x[batch_idx]
+        yb = y[batch_idx]
         opt.zero_grad(set_to_none=True)
         logits = model(xb)
         loss = loss_fn(logits, yb)

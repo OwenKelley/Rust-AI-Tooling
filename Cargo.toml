@@ -4,14 +4,14 @@ members = [
     "crates/rnumpy",
     "crates/rscipy",
     "crates/rpandas",
-    "crates/rtorch",
+    "crates/rustorch",
     "crates/parity_runner",
 ]
 default-members = [
     "crates/rnumpy",
     "crates/rscipy",
     "crates/rpandas",
-    "crates/rtorch",
+    "crates/rustorch",
     "crates/parity_runner",
 ]
 

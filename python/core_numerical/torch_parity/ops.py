@@ -1,4 +1,4 @@
-"""Python torch reference ops for parity with rtorch."""
+"""Python torch reference ops for parity with RusTorch (`rustorch`)."""
 
 from __future__ import annotations
 

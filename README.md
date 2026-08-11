@@ -10,6 +10,7 @@ Building Rust equivalents of the Python AI/ML stack, with parity and speed tests
 - Next roadmap: [`core_numerical/ROADMAP.md`](core_numerical/ROADMAP.md)
 - Speed comparisons: [`core_numerical/SPEED.md`](core_numerical/SPEED.md)
 - End-to-end examples: [`example comparisons/`](example%20comparisons/) (MNIST MLP wall-clock)
+- **PyTorch → RusTorch translation:** [`crates/rustorch/TRANSLATING.md`](crates/rustorch/TRANSLATING.md)
 
 ## Quick compare (NumPy)
 

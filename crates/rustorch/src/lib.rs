@@ -1,4 +1,4 @@
-//! `rtorch` — PyTorch-shaped tensor + autograd API for Rust (CPU f32).
+//! RusTorch (`rustorch`) — PyTorch-shaped tensor + autograd API for Rust (CPU f32).
 //!
 //! Portable by default (`matrixmultiply` GEMM). Enable the `parallel` feature
 //! (on by default) for a Rayon thread pool on mid/large matmuls. Disable with
@@ -22,6 +22,7 @@ pub mod nn;
 pub mod ops;
 pub mod optim;
 pub mod tensor;
+pub mod tensor_ops;
 
 pub use amp::{autocast, is_autocast_enabled, AutocastGuard, GradScaler};
 pub use bridge::{

@@ -1,6 +1,6 @@
 # Example comparisons (Python vs Rust)
 
-Side-by-side projects that exercise **PyTorch** and **rtorch** on the same task,
+Side-by-side projects that exercise **PyTorch** and **rustorch** on the same task,
 with the same architecture, hyperparameters, and data so wall-clock differences
 are easier to interpret than microbenchmarks.
 

@@ -1,6 +1,6 @@
 # Core Numerical — next roadmap
 
-Practical next slices after the closed `rtorch` TORCH.md items 1–7.
+Practical next slices after the closed `rustorch` TORCH.md items 1–7.
 Work top-down within each crate; keep local/`std` only and extend existing
 parity harnesses.
 

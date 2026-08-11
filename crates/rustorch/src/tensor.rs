@@ -583,7 +583,7 @@ impl Tensor {
         match device {
             Device::Cpu => self.clone(),
             Device::Cuda => panic!(
-                "rtorch: Device::Cuda is API-only; no CUDA runtime. Use Device::Cpu."
+                "RusTorch: Device::Cuda is API-only; no CUDA runtime. Use Device::Cpu."
             ),
         }
     }

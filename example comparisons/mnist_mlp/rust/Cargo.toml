@@ -1,5 +1,5 @@
 [package]
-name = "mnist_mlp_rtorch"
+name = "mnist_mlp_rustorch"
 version = "0.1.0"
 edition = "2021"
 
@@ -13,4 +13,4 @@ panic = "abort"
 opt-level = 3
 
 [dependencies]
-rtorch = { path = "../../../crates/rtorch" }
+rustorch = { path = "../../../crates/rustorch" }

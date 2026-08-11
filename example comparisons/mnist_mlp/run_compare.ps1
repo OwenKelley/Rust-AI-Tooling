@@ -1,8 +1,12 @@
-# Compare wall-clock MNIST MLP training: PyTorch vs rtorch.
+# Compare wall-clock MNIST MLP training: PyTorch vs RusTorch (naive + fast).
+#
+# Order: rust fast, rust naive, python (rust first so a cold/slow Python start
+# does not inflate "speedup"). Optional -Trials N reports median walls.
 param(
     [int]$Epochs = 25,
     [int]$BatchSize = 128,
-    [int]$Seed = 42
+    [int]$Seed = 42,
+    [int]$Trials = 1
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,14 +21,13 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 if (-not $env:CARGO_TARGET_DIR) {
     $env:CARGO_TARGET_DIR = Join-Path $RepoRoot "target\example_comparisons"
 }
-$RustBin = Join-Path $env:CARGO_TARGET_DIR "release\mnist_mlp_rtorch.exe"
+$RustBin = Join-Path $env:CARGO_TARGET_DIR "release\mnist_mlp_rustorch.exe"
 
 function Invoke-Capture {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][string[]]$ArgumentList
     )
-    # Do not merge stderr with 2>&1 under Stop: native stderr becomes terminating ErrorRecords.
     $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     $lines = & $FilePath @ArgumentList 2>&1 | ForEach-Object { "$_" }
@@ -34,6 +37,19 @@ function Invoke-Capture {
         Write-Host $line
     }
     return @{ ExitCode = $code; Lines = $lines }
+}
+
+function Parse-Wall([string]$line) {
+    if ($line -match "wall_sec=([0-9.]+)") { return [double]$Matches[1] }
+    return $null
+}
+
+function Get-Median([double[]]$xs) {
+    $s = $xs | Sort-Object
+    $n = $s.Count
+    if ($n -eq 0) { return $null }
+    if ($n % 2 -eq 1) { return $s[[int]($n / 2)] }
+    return ($s[$n / 2 - 1] + $s[$n / 2]) / 2.0
 }
 
 Write-Host "== ensure MNIST data =="
@@ -57,30 +73,63 @@ $common = @(
     "--data-dir", $DataDir
 )
 
-Write-Host "== python (PyTorch) =="
-$py = Invoke-Capture -FilePath "python" -ArgumentList (@($PyTrain) + $common)
-if ($py.ExitCode -ne 0) { exit $py.ExitCode }
-$pyResult = ($py.Lines | Where-Object { $_ -match "^RESULT " } | Select-Object -Last 1)
+$pyWalls = @()
+$naiveWalls = @()
+$fastWalls = @()
+$pyResult = $null
+$naiveResult = $null
+$fastResult = $null
 
-Write-Host "== rust (rtorch) =="
-$rs = Invoke-Capture -FilePath $RustBin -ArgumentList $common
-if ($rs.ExitCode -ne 0) { exit $rs.ExitCode }
-$rsResult = ($rs.Lines | Where-Object { $_ -match "^RESULT " } | Select-Object -Last 1)
+for ($t = 1; $t -le $Trials; $t++) {
+    if ($Trials -gt 1) {
+        Write-Host ""
+        Write-Host "==== trial $t / $Trials ===="
+    }
 
-function Parse-Wall([string]$line) {
-    if ($line -match "wall_sec=([0-9.]+)") { return [double]$Matches[1] }
-    return $null
+    # Warm / measure rust before python so a cold MKL/torch start does not dominate.
+    Write-Host "== rust fast (fused train helpers) =="
+    $rsFast = Invoke-Capture -FilePath $RustBin -ArgumentList ($common + @("--mode", "fast"))
+    if ($rsFast.ExitCode -ne 0) { exit $rsFast.ExitCode }
+    $fastResult = ($rsFast.Lines | Where-Object { $_ -match "^RESULT " } | Select-Object -Last 1)
+    $fastWalls += ,(Parse-Wall "$fastResult")
+
+    Write-Host "== rust naive (1:1 PyTorch-shaped API) =="
+    $rsNaive = Invoke-Capture -FilePath $RustBin -ArgumentList ($common + @("--mode", "naive"))
+    if ($rsNaive.ExitCode -ne 0) { exit $rsNaive.ExitCode }
+    $naiveResult = ($rsNaive.Lines | Where-Object { $_ -match "^RESULT " } | Select-Object -Last 1)
+    $naiveWalls += ,(Parse-Wall "$naiveResult")
+
+    Write-Host "== python (PyTorch) =="
+    $py = Invoke-Capture -FilePath "python" -ArgumentList (@($PyTrain) + $common)
+    if ($py.ExitCode -ne 0) { exit $py.ExitCode }
+    $pyResult = ($py.Lines | Where-Object { $_ -match "^RESULT " } | Select-Object -Last 1)
+    $pyWalls += ,(Parse-Wall "$pyResult")
 }
 
-$pyWall = Parse-Wall "$pyResult"
-$rsWall = Parse-Wall "$rsResult"
+$pyWall = Get-Median $pyWalls
+$naiveWall = Get-Median $naiveWalls
+$fastWall = Get-Median $fastWalls
 
 Write-Host ""
 Write-Host "======== COMPARISON ========"
-Write-Host "python: $pyResult"
-Write-Host "rust:   $rsResult"
-if ($null -ne $pyWall -and $null -ne $rsWall -and $rsWall -gt 0) {
-    $speedup = $pyWall / $rsWall
-    Write-Host ("speedup (py_wall / rs_wall) = {0:N3}x" -f $speedup)
+if ($Trials -gt 1) {
+    Write-Host ("trials={0} (reporting median wall_sec)" -f $Trials)
+    Write-Host ("python walls:      {0}" -f (($pyWalls | ForEach-Object { "{0:N4}" -f $_ }) -join ", "))
+    Write-Host ("rust naive walls:  {0}" -f (($naiveWalls | ForEach-Object { "{0:N4}" -f $_ }) -join ", "))
+    Write-Host ("rust fast walls:   {0}" -f (($fastWalls | ForEach-Object { "{0:N4}" -f $_ }) -join ", "))
+}
+Write-Host "python:      $pyResult"
+Write-Host "rust naive:  $naiveResult"
+Write-Host "rust fast:   $fastResult"
+if ($null -ne $pyWall -and $null -ne $naiveWall -and $naiveWall -gt 0) {
+    Write-Host ("speedup naive (py / rust_naive) = {0:N3}x" -f ($pyWall / $naiveWall))
+}
+if ($null -ne $pyWall -and $null -ne $fastWall -and $fastWall -gt 0) {
+    Write-Host ("speedup fast  (py / rust_fast)  = {0:N3}x" -f ($pyWall / $fastWall))
+}
+if ($null -ne $naiveWall -and $null -ne $fastWall -and $fastWall -gt 0) {
+    Write-Host ("fast vs naive (naive / fast)    = {0:N3}x" -f ($naiveWall / $fastWall))
 }
 Write-Host "============================"
+Write-Host "Note: single-run speedups swing with PyTorch cold start (your earlier"
+Write-Host "26s vs 19s python walls). Prefer -Trials 3 for a stable median."

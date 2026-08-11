@@ -3,7 +3,7 @@ name = "parity_runner"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Runs rnumpy/rscipy/rpandas/rtorch ops and emits JSON timings/checksums for Python comparison"
+description = "Runs rnumpy/rscipy/rpandas/RusTorch ops and emits JSON timings/checksums for Python comparison"
 
 [[bin]]
 name = "parity_runner"
@@ -25,4 +25,4 @@ path = "src/torch_main.rs"
 rnumpy = { path = "../rnumpy" }
 rscipy = { path = "../rscipy" }
 rpandas = { path = "../rpandas" }
-rtorch = { path = "../rtorch" }
+rustorch = { path = "../rustorch" }

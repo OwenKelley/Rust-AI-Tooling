@@ -1,4 +1,4 @@
-//! Bridges between `rtorch::Tensor` and `rnumpy` / `rpandas`
+//! Bridges between `rustorch::Tensor` and `rnumpy` / `rpandas`
 //! (`torch.from_numpy` / `.numpy()` / `torch.tensor(df.values)`).
 
 use rnumpy::{NdArray, NdArrayF32};

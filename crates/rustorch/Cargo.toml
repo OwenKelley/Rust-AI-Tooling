@@ -1,9 +1,9 @@
 [package]
-name = "rtorch"
+name = "rustorch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "PyTorch-like tensor + autograd API for Rust (1:1 mapping target)"
+description = "RusTorch — PyTorch-like tensor + autograd API for Rust (1:1 mapping target)"
 
 [features]
 default = ["parallel"]

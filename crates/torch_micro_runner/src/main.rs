@@ -1,10 +1,10 @@
-//! Tiny binary for short rtorch kernels (avoids megabinary timing noise on Windows).
+//! Tiny binary for short rustorch kernels (avoids megabinary timing noise on Windows).
 
 use std::env;
 use std::process;
 use std::time::Instant;
 
-use rtorch::{
+use rustorch::{
     add, from_numpy_f32_owned, index_select, matmul, seeded_uniform, stack, to_numpy_f32,
 };
 

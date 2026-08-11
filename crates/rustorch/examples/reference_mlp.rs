@@ -1,10 +1,10 @@
 //! Reference MLP: Linear → ReLU → Linear + CrossEntropy + Adam (few steps).
 //!
 //! ```text
-//! cargo run -p rtorch --example reference_mlp --release
+//! cargo run -p rustorch --example reference_mlp --release
 //! ```
 
-use rtorch::{
+use rustorch::{
     cross_entropy, fused_linear_relu, linear, no_grad, seeded_uniform, Adam, Linear, Module, ReLU,
 };
 

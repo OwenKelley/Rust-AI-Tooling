@@ -50,10 +50,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "mnist_mlp_rtorch"
+name = "mnist_mlp_rustorch"
 version = "0.1.0"
 dependencies = [
- "rtorch",
+ "rustorch",
 ]
 
 [[package]]
@@ -94,7 +94,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtorch"
+name = "rustorch"
 version = "0.1.0"
 dependencies = [
  "matrixmultiply",

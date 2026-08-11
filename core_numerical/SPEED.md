@@ -238,7 +238,7 @@ Raw JSON: [`results/`](results/).
 | `sum` | 103.73× |
 | `filter_gt` | 71.76× |
 
-## PyTorch / rtorch
+## PyTorch / rustorch
 
 96 ops · parity OK 96 · Rust faster on 87
 

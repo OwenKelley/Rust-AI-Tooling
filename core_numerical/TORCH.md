@@ -1,14 +1,14 @@
 # Core Numerical — PyTorch parity (Python ↔ Rust)
 
 Deep-learning slice of the 1:1 Python→Rust translation work. Maps common
-**PyTorch** APIs onto the Rust crate `rtorch` (CPU `f32`, local/`std` only),
+**PyTorch** APIs onto **RusTorch** (crate `rustorch`; CPU `f32`, local/`std` only),
 with correctness and speed checks against PyTorch.
 
 ## Layout
 
 | Path | Role |
 |------|------|
-| `crates/rtorch` | Tensor + autograd + `nn` / optim |
+| `crates/rustorch` | Tensor + autograd + `nn` / optim |
 | `crates/parity_runner` (`torch_parity_runner`) | Times an op and prints JSON |
 | `crates/torch_micro_runner` | Tiny standalone timer for short kernels (stable Windows timings) |
 | `python/core_numerical/torch_parity` | PyTorch reference + comparison harness |
@@ -17,39 +17,39 @@ with correctness and speed checks against PyTorch.
 
 | Python | Rust |
 |--------|------|
-| `torch.zeros/ones/full` / seeded uniforms | `rtorch::{zeros,ones,full,seeded_uniform,randn}` |
-| `+ - * /` (broadcast), `matmul` | `rtorch::{add,sub,mul,div,matmul}` |
-| `tensor.add_` / `mul_` / `sub_` / `relu_` / `zero_` / `fill_` | `rtorch::{add_,mul_,sub_,relu_,zero_,fill_}` |
-| `torch.narrow` / `select` | `rtorch::{narrow,select}` (narrow is a strided view; select materializes) |
-| `exp` / `log` / `pow` / `neg` / `abs` / `clamp` | `rtorch::{exp,log,pow,neg,abs,clamp}` |
-| `sum` / `mean` | `rtorch::{sum,mean}` |
-| `reshape` / `t` | `rtorch::{reshape,transpose}` |
-| `torch.cat` / `stack` / `index_select` | `rtorch::{cat,stack,index_select}` |
-| `F.relu` / `leaky_relu` / `silu` / `sigmoid` / `tanh` / `gelu` / `softmax` | `rtorch::{relu,leaky_relu,silu,sigmoid,tanh,gelu,softmax}` |
-| `F.scaled_dot_product_attention` | `rtorch::scaled_dot_product_attention` (+ `_masked`) |
-| `nn.Transformer.generate_square_subsequent_mask` | `rtorch::generate_square_subsequent_mask` |
-| `nn.Linear` / `Sequential` / `Embedding` / `Flatten` / `GRU` / `LSTM` / `MultiheadAttention` | `rtorch::{Linear,Sequential,Embedding,Flatten,GRU,LSTM,MultiheadAttention}` (`forward_qkv_masked`) |
-| `nn.TransformerEncoderLayer` / `TransformerEncoder` | `rtorch::{TransformerEncoderLayer,TransformerEncoder}` |
-| `nn.TransformerDecoderLayer` / `TransformerDecoder` | `rtorch::{TransformerDecoderLayer,TransformerDecoder}` |
-| `nn.LayerNorm` / `BatchNorm1d` / `BatchNorm2d` / `Conv2d` | `rtorch::{LayerNorm,BatchNorm1d,BatchNorm2d,Conv2d}` |
-| `nn.AdaptiveAvgPool2d` / Max/Avg pool | `rtorch::{AdaptiveAvgPool2d,MaxPool2d,AvgPool2d}` |
-| `nn.MSELoss` / `CrossEntropyLoss` | `rtorch::{MSELoss,CrossEntropyLoss}` |
+| `torch.zeros/ones/full` / seeded uniforms | `rustorch::{zeros,ones,full,seeded_uniform,randn}` |
+| `+ - * /` (broadcast), `matmul` | `rustorch::{add,sub,mul,div,matmul}` |
+| `tensor.add_` / `mul_` / `sub_` / `relu_` / `zero_` / `fill_` | `rustorch::{add_,mul_,sub_,relu_,zero_,fill_}` |
+| `torch.narrow` / `select` | `rustorch::{narrow,select}` (narrow is a strided view; select materializes) |
+| `exp` / `log` / `pow` / `neg` / `abs` / `clamp` | `rustorch::{exp,log,pow,neg,abs,clamp}` |
+| `sum` / `mean` | `rustorch::{sum,mean}` |
+| `reshape` / `t` | `rustorch::{reshape,transpose}` |
+| `torch.cat` / `stack` / `index_select` | `rustorch::{cat,stack,index_select}` |
+| `F.relu` / `leaky_relu` / `silu` / `sigmoid` / `tanh` / `gelu` / `softmax` | `rustorch::{relu,leaky_relu,silu,sigmoid,tanh,gelu,softmax}` |
+| `F.scaled_dot_product_attention` | `rustorch::scaled_dot_product_attention` (+ `_masked`) |
+| `nn.Transformer.generate_square_subsequent_mask` | `rustorch::generate_square_subsequent_mask` |
+| `nn.Linear` / `Sequential` / `Embedding` / `Flatten` / `GRU` / `LSTM` / `MultiheadAttention` | `rustorch::{Linear,Sequential,Embedding,Flatten,GRU,LSTM,MultiheadAttention}` (`forward_qkv_masked`) |
+| `nn.TransformerEncoderLayer` / `TransformerEncoder` | `rustorch::{TransformerEncoderLayer,TransformerEncoder}` |
+| `nn.TransformerDecoderLayer` / `TransformerDecoder` | `rustorch::{TransformerDecoderLayer,TransformerDecoder}` |
+| `nn.LayerNorm` / `BatchNorm1d` / `BatchNorm2d` / `Conv2d` | `rustorch::{LayerNorm,BatchNorm1d,BatchNorm2d,Conv2d}` |
+| `nn.AdaptiveAvgPool2d` / Max/Avg pool | `rustorch::{AdaptiveAvgPool2d,MaxPool2d,AvgPool2d}` |
+| `nn.MSELoss` / `CrossEntropyLoss` | `rustorch::{MSELoss,CrossEntropyLoss}` |
 | `loss.backward()` / `backward(create_graph=True)` | `Tensor::backward` / `backward_with` |
-| `torch.autograd.grad` / `gradcheck` | `rtorch::{grad,gradcheck_max_error}` |
-| `torch.autograd.Function` | `rtorch::{apply_function,FunctionCtx,square_function}` |
-| `tensor.device` / `.to` / `.cpu` | `Tensor::{device,to,cpu}` / `rtorch::Device` (`Cpu` / `Cuda` stub) |
-| `F.relu(F.linear(...))` fused | `rtorch::fused_linear_relu` |
-| `torch.amp.GradScaler` / `autocast` | `rtorch::{GradScaler,autocast}` (f32 scale/unscale; no FP16 kernels) |
-| `tensor.dtype` / `.float` / `.double` / `.long` / `.bool` / `.to(dtype)` | `Tensor::{dtype,float,double,long,bool_,to_dtype}` / `rtorch::Dtype` (`Float32`/`Float64`/`Int64`/`Bool`) |
-| `torch.nested.nested_tensor` / `to_padded_tensor` | `rtorch::{nested_tensor,NestedTensor::to_padded_tensor}` |
-| `torch.from_numpy` / `tensor.numpy` | `rtorch::{from_numpy,to_numpy}` / `Tensor::numpy` (via `rnumpy`) |
-| `torch.tensor(df.values)` / `DataFrame(tensor)` | `rtorch::{from_dataframe,to_dataframe}` (via `rpandas`) |
-| `optim.SGD` / `Adam` / `AdamW` | `rtorch::{SGD,Adam,AdamW}` |
+| `torch.autograd.grad` / `gradcheck` | `rustorch::{grad,gradcheck_max_error}` |
+| `torch.autograd.Function` | `rustorch::{apply_function,FunctionCtx,square_function}` |
+| `tensor.device` / `.to` / `.cpu` | `Tensor::{device,to,cpu}` / `rustorch::Device` (`Cpu` / `Cuda` stub) |
+| `F.relu(F.linear(...))` fused | `rustorch::fused_linear_relu` |
+| `torch.amp.GradScaler` / `autocast` | `rustorch::{GradScaler,autocast}` (f32 scale/unscale; no FP16 kernels) |
+| `tensor.dtype` / `.float` / `.double` / `.long` / `.bool` / `.to(dtype)` | `Tensor::{dtype,float,double,long,bool_,to_dtype}` / `rustorch::Dtype` (`Float32`/`Float64`/`Int64`/`Bool`) |
+| `torch.nested.nested_tensor` / `to_padded_tensor` | `rustorch::{nested_tensor,NestedTensor::to_padded_tensor}` |
+| `torch.from_numpy` / `tensor.numpy` | `rustorch::{from_numpy,to_numpy}` / `Tensor::numpy` (via `rnumpy`) |
+| `torch.tensor(df.values)` / `DataFrame(tensor)` | `rustorch::{from_dataframe,to_dataframe}` (via `rpandas`) |
+| `optim.SGD` / `Adam` / `AdamW` | `rustorch::{SGD,Adam,AdamW}` |
 | `Adam.state_dict` / `load_state_dict` | `Adam::{state_dict,load_state_dict}` / `AdamStateDict` |
-| `StepLR` / `MultiStepLR` / `CosineAnnealingLR` | `rtorch::{StepLR,MultiStepLR,CosineAnnealingLR}` |
-| `state_dict` / `load_state_dict` (params) | `rtorch::{state_dict,load_state_dict}` |
-| `TensorDataset` / `DataLoader` / `SequentialSampler` / `RandomSampler` / `default_collate` | `rtorch::{TensorDataset,DataLoader,SequentialSampler,RandomSampler,default_collate}` |
-| `tensor.detach` / `torch.no_grad` | `Tensor::detach` / `rtorch::no_grad` |
+| `StepLR` / `MultiStepLR` / `CosineAnnealingLR` | `rustorch::{StepLR,MultiStepLR,CosineAnnealingLR}` |
+| `state_dict` / `load_state_dict` (params) | `rustorch::{state_dict,load_state_dict}` |
+| `TensorDataset` / `DataLoader` / `SequentialSampler` / `RandomSampler` / `default_collate` | `rustorch::{TensorDataset,DataLoader,SequentialSampler,RandomSampler,default_collate}` |
+| `tensor.detach` / `torch.no_grad` | `Tensor::detach` / `rustorch::no_grad` |
 
 **CPU storage:** Float32/Float64 share `f32` buffers (Float64 is a dtype tag). Int64 and Bool use typed `i64` / `u8` (0/1) buffers. Dynamic reverse-mode autograd. No CUDA or `torch.compile`.
 
@@ -59,7 +59,7 @@ with correctness and speed checks against PyTorch.
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 
 cargo build -p parity_runner --bin torch_parity_runner --release
-cargo test -p rtorch
+cargo test -p rustorch
 
 cd python
 pip install -e .
@@ -91,12 +91,12 @@ python -m core_numerical.torch_parity.compare --size 64 --iters 20
 Reference model:
 
 ```powershell
-cargo run -p rtorch --example reference_mlp --release
+cargo run -p rustorch --example reference_mlp --release
 ```
 
 Linear → ReLU → Linear with CrossEntropy + Adam for a few steps; also exercises `fused_linear_relu` under `no_grad`.
 
-**ONNX (conceptual):** export by walking `state_dict()` keys (`weight`/`bias` per module) into an ONNX graph of Gemm/Relu/Softmax nodes; rtorch does not ship an ONNX writer. Keep parameter shapes identical to PyTorch (`Linear`: `[out,in]`).
+**ONNX (conceptual):** export by walking `state_dict()` keys (`weight`/`bias` per module) into an ONNX graph of Gemm/Relu/Softmax nodes; rustorch does not ship an ONNX writer. Keep parameter shapes identical to PyTorch (`Linear`: `[out,in]`).
 
 **Hugging Face:** map `from_pretrained` weight names onto `state_dict` / `load_state_dict` (e.g. `encoder.layer.*.linear1.weight` → nested `Sequential` / custom module names). Transpose rules match PyTorch (`nn.Linear` weight layout).
 

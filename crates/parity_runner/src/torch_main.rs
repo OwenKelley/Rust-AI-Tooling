@@ -4,7 +4,7 @@ use std::env;
 use std::process;
 use std::time::Instant;
 
-use rtorch::{
+use rustorch::{
     adaptive_avg_pool2d, add, add_, avg_pool2d, cat, clamp, cross_entropy, default_collate,
     dropout, exp, from_dataframe, from_numpy_f32_owned, fused_linear_relu, gelu,
     generate_square_subsequent_mask, grad, gradcheck_max_error, index_select, leaky_relu, linear,
