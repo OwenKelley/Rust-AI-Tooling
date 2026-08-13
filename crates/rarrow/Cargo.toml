@@ -1,0 +1,9 @@
+[package]
+name = "rarrow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PyArrow-shaped Arrow / Parquet API for Rust (std only)"
+
+[dependencies]
+rnumpy = { path = "../rnumpy" }

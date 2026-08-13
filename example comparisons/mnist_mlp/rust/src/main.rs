@@ -2,9 +2,13 @@
 //!
 //! `--mode naive`  1:1 translation of `python/train_mnist.py` (default module API)
 //! `--mode fast`   fused helpers / train-path opts (fused Linear+ReLU/CE, …)
+//!
+//! Training: optional `--save PATH` writes a portable weight checkpoint.
+//! Inference: `--infer --checkpoint PATH` loads weights and runs timed forward passes.
 
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -17,6 +21,7 @@ const LR: f32 = 1e-3;
 const DEFAULT_EPOCHS: usize = 25;
 const DEFAULT_BATCH: usize = 128;
 const DEFAULT_SEED: u64 = 42;
+const CKPT_MAGIC: u32 = 0x5254_4D4C; // "RTML"
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -182,8 +187,6 @@ fn run_epoch_train_fast(
     batch_size: usize,
     seed: u64,
 ) -> f32 {
-    // Same shuffle/gather recipe as naive + Python; speed comes from fused
-    // Linear+ReLU / Linear+CE and step_and_zero_grad (not a different data path).
     let order = lcg_shuffle(y.len(), seed);
     let mut total_loss = 0.0f32;
     let mut n_batches = 0usize;
@@ -245,19 +248,188 @@ fn run_eval_fast(model: &Mlp, x: &Tensor, y: &[usize], batch_size: usize) -> f64
     })
 }
 
-fn parse_args() -> (Mode, usize, usize, u64, PathBuf) {
-    let mut mode = Mode::Naive;
-    let mut epochs = DEFAULT_EPOCHS;
-    let mut batch_size = DEFAULT_BATCH;
-    let mut seed = DEFAULT_SEED;
-    let mut data_dir = data_dir_default();
+fn run_inference_passes(model: &Mlp, mode: Mode, x: &Tensor, batch_size: usize, passes: usize) {
+    no_grad(|| {
+        for _ in 0..passes {
+            let mut start = 0usize;
+            while start < x.shape()[0] {
+                let end = (start + batch_size).min(x.shape()[0]);
+                let batch_idx: Vec<usize> = (start..end).collect();
+                let xb = gather_rows(x, &batch_idx);
+                match mode {
+                    Mode::Naive => {
+                        let _ = model.forward_naive(&xb);
+                    }
+                    Mode::Fast => {
+                        let h = model.fc1.forward_relu(&xb);
+                        let _ = model.fc2.forward(&h);
+                    }
+                }
+                start = end;
+            }
+        }
+    });
+}
+
+fn write_f32_le(out: &mut Vec<u8>, values: &[f32]) {
+    for &v in values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+fn read_f32_le(buf: &[u8], off: &mut usize, n: usize) -> Vec<f32> {
+    let need = n * 4;
+    assert!(
+        *off + need <= buf.len(),
+        "checkpoint truncated at offset {}",
+        *off
+    );
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut b = [0u8; 4];
+        b.copy_from_slice(&buf[*off..*off + 4]);
+        *off += 4;
+        out.push(f32::from_le_bytes(b));
+    }
+    out
+}
+
+/// Portable RusTorch MLP checkpoint (little-endian f32 weights).
+fn save_checkpoint(
+    path: &Path,
+    model: &Mlp,
+    seed: u64,
+    epochs: usize,
+    batch_size: usize,
+    train_loss: f32,
+    val_acc: f64,
+    mode: Mode,
+) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    let w1 = model.fc1.weight.data();
+    let b1 = model
+        .fc1
+        .bias
+        .as_ref()
+        .expect("fc1 bias")
+        .data();
+    let w2 = model.fc2.weight.data();
+    let b2 = model
+        .fc2
+        .bias
+        .as_ref()
+        .expect("fc2 bias")
+        .data();
+    assert_eq!(w1.len(), HIDDEN * 784);
+    assert_eq!(b1.len(), HIDDEN);
+    assert_eq!(w2.len(), 10 * HIDDEN);
+    assert_eq!(b2.len(), 10);
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&CKPT_MAGIC.to_le_bytes());
+    bytes.extend_from_slice(&(HIDDEN as u32).to_le_bytes());
+    bytes.extend_from_slice(&(seed as u64).to_le_bytes());
+    bytes.extend_from_slice(&(epochs as u32).to_le_bytes());
+    bytes.extend_from_slice(&(batch_size as u32).to_le_bytes());
+    bytes.extend_from_slice(&train_loss.to_le_bytes());
+    bytes.extend_from_slice(&val_acc.to_le_bytes());
+    let mode_tag: u32 = match mode {
+        Mode::Naive => 0,
+        Mode::Fast => 1,
+    };
+    bytes.extend_from_slice(&mode_tag.to_le_bytes());
+    write_f32_le(&mut bytes, &w1);
+    write_f32_le(&mut bytes, &b1);
+    write_f32_le(&mut bytes, &w2);
+    write_f32_le(&mut bytes, &b2);
+    fs::write(path, &bytes).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+
+    let meta = format!(
+        "{{\n  \"backend\": \"rustorch\",\n  \"mode\": \"{}\",\n  \"hidden\": {HIDDEN},\n  \
+         \"seed\": {seed},\n  \"epochs\": {epochs},\n  \"batch_size\": {batch_size},\n  \
+         \"train_loss\": {train_loss},\n  \"val_acc\": {val_acc}\n}}\n",
+        mode.as_str()
+    );
+    let meta_path = path.with_extension("json");
+    fs::write(&meta_path, meta).ok();
+    println!("saved checkpoint -> {}", path.display());
+}
+
+fn load_checkpoint(path: &Path) -> (Mlp, u64, usize, f64) {
+    let mut file = fs::File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let mut off = 0usize;
+    let magic = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+    off += 4;
+    assert_eq!(magic, CKPT_MAGIC, "bad rustorch checkpoint magic");
+    let hidden = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+    off += 4;
+    assert_eq!(hidden, HIDDEN);
+    let seed = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+    off += 8;
+    let epochs = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+    off += 4;
+    off += 4; // batch_size
+    off += 4; // train_loss
+    let val_acc = f64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+    off += 8;
+    off += 4; // mode tag
+
+    let w1 = read_f32_le(&buf, &mut off, HIDDEN * 784);
+    let b1 = read_f32_le(&buf, &mut off, HIDDEN);
+    let w2 = read_f32_le(&buf, &mut off, 10 * HIDDEN);
+    let b2 = read_f32_le(&buf, &mut off, 10);
+
+    let model = Mlp {
+        fc1: Linear::from_params(
+            Tensor::from_vec(w1, &[HIDDEN, 784], true),
+            Some(Tensor::from_vec(b1, &[HIDDEN], true)),
+        ),
+        relu: ReLU,
+        fc2: Linear::from_params(
+            Tensor::from_vec(w2, &[10, HIDDEN], true),
+            Some(Tensor::from_vec(b2, &[10], true)),
+        ),
+    };
+    (model, seed, epochs, val_acc)
+}
+
+struct Cli {
+    infer: bool,
+    mode: Mode,
+    epochs: usize,
+    batch_size: usize,
+    seed: u64,
+    data_dir: PathBuf,
+    save: Option<PathBuf>,
+    checkpoint: Option<PathBuf>,
+    passes: usize,
+}
+
+fn parse_args() -> Cli {
+    let mut cli = Cli {
+        infer: false,
+        mode: Mode::Naive,
+        epochs: DEFAULT_EPOCHS,
+        batch_size: DEFAULT_BATCH,
+        seed: DEFAULT_SEED,
+        data_dir: data_dir_default(),
+        save: None,
+        checkpoint: None,
+        passes: 50,
+    };
     let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--infer" => cli.infer = true,
             "--mode" => {
                 i += 1;
-                mode = match args[i].as_str() {
+                cli.mode = match args[i].as_str() {
                     "naive" => Mode::Naive,
                     "fast" => Mode::Fast,
                     other => panic!("--mode must be naive|fast, got {other}"),
@@ -265,76 +437,131 @@ fn parse_args() -> (Mode, usize, usize, u64, PathBuf) {
             }
             "--epochs" => {
                 i += 1;
-                epochs = args[i].parse().expect("--epochs");
+                cli.epochs = args[i].parse().expect("--epochs");
             }
             "--batch-size" => {
                 i += 1;
-                batch_size = args[i].parse().expect("--batch-size");
+                cli.batch_size = args[i].parse().expect("--batch-size");
             }
             "--seed" => {
                 i += 1;
-                seed = args[i].parse().expect("--seed");
+                cli.seed = args[i].parse().expect("--seed");
             }
             "--data-dir" => {
                 i += 1;
-                data_dir = PathBuf::from(&args[i]);
+                cli.data_dir = PathBuf::from(&args[i]);
+            }
+            "--save" => {
+                i += 1;
+                cli.save = Some(PathBuf::from(&args[i]));
+            }
+            "--checkpoint" => {
+                i += 1;
+                cli.checkpoint = Some(PathBuf::from(&args[i]));
+            }
+            "--passes" => {
+                i += 1;
+                cli.passes = args[i].parse().expect("--passes");
             }
             other => panic!("unknown arg: {other}"),
         }
         i += 1;
     }
-    (mode, epochs, batch_size, seed, data_dir)
+    cli
 }
 
 fn main() {
-    let (mode, epochs, batch_size, seed, data_dir) = parse_args();
+    let cli = parse_args();
+    let x_test = read_idx_images(&cli.data_dir.join("t10k-images-idx3-ubyte"));
+    let y_test = read_idx_labels(&cli.data_dir.join("t10k-labels-idx1-ubyte"));
 
-    let x_train = read_idx_images(&data_dir.join("train-images-idx3-ubyte"));
-    let y_train = read_idx_labels(&data_dir.join("train-labels-idx1-ubyte"));
-    let x_test = read_idx_images(&data_dir.join("t10k-images-idx3-ubyte"));
-    let y_test = read_idx_labels(&data_dir.join("t10k-labels-idx1-ubyte"));
+    if cli.infer {
+        let ckpt = cli
+            .checkpoint
+            .as_ref()
+            .expect("--infer requires --checkpoint");
+        let (model, seed, epochs, train_val_acc) = load_checkpoint(ckpt);
+        let val_acc = match cli.mode {
+            Mode::Naive => run_eval_naive(&model, &x_test, &y_test, cli.batch_size),
+            Mode::Fast => run_eval_fast(&model, &x_test, &y_test, cli.batch_size),
+        };
+        // Warmup
+        run_inference_passes(&model, cli.mode, &x_test, cli.batch_size, 1);
+        let t0 = Instant::now();
+        run_inference_passes(&model, cli.mode, &x_test, cli.batch_size, cli.passes);
+        let wall = t0.elapsed().as_secs_f64();
+        println!(
+            "RESULT backend={} phase=infer wall_sec={wall:.6} val_acc={val_acc:.4} \
+             train_val_acc={train_val_acc:.4} seed={seed} epochs={epochs} \
+             passes={} batch_size={} mode={} checkpoint={}",
+            cli.mode.backend_tag(),
+            cli.passes,
+            cli.batch_size,
+            cli.mode.as_str(),
+            ckpt.display()
+        );
+        return;
+    }
 
-    let model = Mlp::new(seed);
+    let x_train = read_idx_images(&cli.data_dir.join("train-images-idx3-ubyte"));
+    let y_train = read_idx_labels(&cli.data_dir.join("train-labels-idx1-ubyte"));
+
+    let model = Mlp::new(cli.seed);
     let mut opt = Adam::new(model.parameters(), LR);
     let loss_fn = CrossEntropyLoss;
 
     let t0 = Instant::now();
     let mut last_train_loss = 0.0f32;
     let mut last_val_acc = 0.0f64;
-    for epoch in 0..epochs {
-        last_train_loss = match mode {
+    for epoch in 0..cli.epochs {
+        last_train_loss = match cli.mode {
             Mode::Naive => run_epoch_train_naive(
                 &model,
                 &mut opt,
                 &loss_fn,
                 &x_train,
                 &y_train,
-                batch_size,
-                seed + epoch as u64,
+                cli.batch_size,
+                cli.seed + epoch as u64,
             ),
             Mode::Fast => run_epoch_train_fast(
                 &model,
                 &mut opt,
                 &x_train,
                 &y_train,
-                batch_size,
-                seed + epoch as u64,
+                cli.batch_size,
+                cli.seed + epoch as u64,
             ),
         };
-        last_val_acc = match mode {
-            Mode::Naive => run_eval_naive(&model, &x_test, &y_test, batch_size),
-            Mode::Fast => run_eval_fast(&model, &x_test, &y_test, batch_size),
+        last_val_acc = match cli.mode {
+            Mode::Naive => run_eval_naive(&model, &x_test, &y_test, cli.batch_size),
+            Mode::Fast => run_eval_fast(&model, &x_test, &y_test, cli.batch_size),
         };
         println!(
             "epoch={epoch} train_loss={last_train_loss:.6} val_acc={last_val_acc:.4} mode={}",
-            mode.as_str()
+            cli.mode.as_str()
         );
     }
     let wall = t0.elapsed().as_secs_f64();
     println!(
         "RESULT backend={} wall_sec={wall:.4} train_loss={last_train_loss:.6} \
-         val_acc={last_val_acc:.4} epochs={epochs} batch_size={batch_size} mode={}",
-        mode.backend_tag(),
-        mode.as_str()
+         val_acc={last_val_acc:.4} epochs={} batch_size={} mode={}",
+        cli.mode.backend_tag(),
+        cli.epochs,
+        cli.batch_size,
+        cli.mode.as_str()
     );
+
+    if let Some(path) = &cli.save {
+        save_checkpoint(
+            path,
+            &model,
+            cli.seed,
+            cli.epochs,
+            cli.batch_size,
+            last_train_loss,
+            last_val_acc,
+            cli.mode,
+        );
+    }
 }

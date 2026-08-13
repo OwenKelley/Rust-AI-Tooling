@@ -4,6 +4,10 @@ members = [
     "crates/rnumpy",
     "crates/rscipy",
     "crates/rpandas",
+    "crates/rarrow",
+    "crates/rpolars",
+    "crates/rsklearn",
+    "crates/rtokenizers",
     "crates/rustorch",
     "crates/parity_runner",
 ]
@@ -11,6 +15,10 @@ default-members = [
     "crates/rnumpy",
     "crates/rscipy",
     "crates/rpandas",
+    "crates/rarrow",
+    "crates/rpolars",
+    "crates/rsklearn",
+    "crates/rtokenizers",
     "crates/rustorch",
     "crates/parity_runner",
 ]

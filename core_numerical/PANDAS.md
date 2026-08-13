@@ -40,14 +40,21 @@ and speed checks against Pandas.
 | Python | Rust |
 |--------|------|
 | `df.groupby(key).agg(...)` | `rpandas::groupby_agg` |
-| `pd.merge(..., how='inner'/'left')` | `rpandas::merge` |
+| `pd.merge(..., how='inner'/'left'/'right'/'outer')` | `rpandas::{merge,merge_on,MergeHow}` |
+| `pd.merge(..., on=[k1,k2])` | `rpandas::merge_on` |
 | `pd.melt` | `rpandas::melt` |
 | `pd.pivot_table` | `rpandas::pivot_table` |
-| `Series.rolling(w).mean/sum` | `rpandas::{rolling_mean,rolling_sum}` |
+| `Series.map` / `apply` (f64→f64) | `Series::{map_f64,apply_f64}` / `rpandas::{map_f64,apply_f64}` |
+| `Series.astype('category')` codes | `rpandas::{Categorical,categorical_codes}` |
+| `pd.date_range` / `DatetimeIndex` | `rpandas::{date_range,DatetimeIndex,Freq}` (naive epoch ns) |
+| `df.set_index(dt)` / `df.index` | `df.set_index` / `rpandas::Index::{Range,Datetime}` |
+| `df.resample('D'/'h').mean/sum` | `rpandas::{resample_mean,resample_sum}` or `resample_*_index` when index is datetime |
 | `pd.read_csv` / `df.to_csv` | `rpandas::{read_csv,read_csv_str,to_csv,to_csv_string}` |
+| Arrow-inspired IPC / Parquet alias | `rpandas::{to_ipc_bytes,read_ipc_bytes,to_parquet_bytes,…}` (RPIC v1; not full Arrow/Parquet) |
 
-**Dtypes:** `f64` (NaN = missing), `i64` / `bool` / UTF-8 (null masks). No MultiIndex,
-categoricals, or time series yet.
+**Dtypes:** `f64` (NaN = missing), `i64` / `bool` / UTF-8 (null masks). Time series v1:
+naive `datetime64[ns]` via epoch nanoseconds; freqs `'h'` and `'D'` only. Categoricals v1:
+lexicographically sorted categories + integer codes (`-1` null). No MultiIndex yet.
 
 ## Setup
 
@@ -77,5 +84,4 @@ python -m core_numerical.pandas_parity.compare --size 64 --iters 20
 
 ## Next
 
-Time series (`DatetimeIndex`, `resample`); `join` multi-key; `apply`/`map`; Parquet /
-Arrow interop; categoricals.
+See [`ROADMAP_PHASE2.md`](ROADMAP_PHASE2.md) (IPC write↔PyArrow; Apache `PAR1`).

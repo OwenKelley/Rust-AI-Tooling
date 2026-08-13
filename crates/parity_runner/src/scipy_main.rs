@@ -8,14 +8,18 @@ use std::time::Instant;
 
 use rnumpy::{seeded_uniform, NdArray};
 use rscipy::{
-    blackman, butter, cg, cholesky, convolve, correlate, csr_add, csr_frobenius_norm,
-    csr_from_dense, csr_from_threshold, csr_matmat, csr_matvec, csr_to_csc, csr_to_dense,
-    csr_transpose, cumulative_trapezoid, detrend, entropy, erf, erfc, expit, expm, eye_csr, fft,
-    fftconvolve, fftfreq, filtfilt, gamma, gammaln, hamming, hann, i0, ifft, irfft, kurtosis,
-    least_squares, logit, logsumexp, lstsq, lu, lu_factor, minimize_lbfgsb, minimize_nelder_mead,
-    ndtr, ndtri, norm, norm_cdf, norm_ord, norm_pdf, norm_ppf, pearsonr, quad, rankdata, rfft, sem,
-    simpson, skew, softmax, solve_ivp_rk45, solve_triangular, spearmanr, spsolve, stft, trapezoid,
-    ttest_ind, welch, zscore, NormOrd,
+    beta_cdf, beta_pdf, beta_ppf, binom_cdf, binom_pmf, blackman, butter, cg, cholesky, chi2_cdf,
+    chi2_pdf, chi2_ppf, convolve, correlate, csr_add, csr_frobenius_norm, csr_from_dense,
+    csr_from_threshold, csr_matmat, csr_matvec, csr_to_csc, csr_to_dense, csr_transpose,
+    cumulative_trapezoid, detrend, entropy, erf, erfc, expit, expm, expon_cdf, expon_pdf, expon_ppf,
+    eye_csr, fft, fftconvolve, fftfreq, filtfilt, gamma, gamma_cdf_shape, gamma_pdf_shape,
+    gamma_ppf_shape, gammaln, hamming, hann, i0, ifft, irfft, kurtosis, laplace_cdf, laplace_pdf,
+    laplace_ppf, least_squares, logistic_cdf, logistic_pdf, logistic_ppf, logit, logsumexp, lstsq,
+    lu, lu_factor, minimize_lbfgsb, minimize_nelder_mead, ndtr, ndtri, norm, norm_cdf, norm_ord,
+    norm_pdf, norm_ppf, pearsonr, poisson_cdf, poisson_pmf, quad, rankdata, rfft, sem, simpson, skew,
+    softmax, solve_ivp_rk23, solve_ivp_rk45, solve_triangular, spearmanr, spsolve, stft, t_cdf,
+    t_pdf, t_ppf, trapezoid, ttest_ind, uniform_cdf, uniform_pdf, uniform_ppf, welch, zscore,
+    NormOrd, dblquad,
 };
 
 #[derive(Debug, Clone)]
@@ -46,6 +50,34 @@ enum Op {
     NormPdf,
     NormCdf,
     NormPpf,
+    UniformPdf,
+    UniformCdf,
+    UniformPpf,
+    ExponPdf,
+    ExponCdf,
+    ExponPpf,
+    LaplacePdf,
+    LaplaceCdf,
+    LaplacePpf,
+    LogisticPdf,
+    LogisticCdf,
+    LogisticPpf,
+    TPdf,
+    TCdf,
+    TPpf,
+    Chi2Pdf,
+    Chi2Cdf,
+    Chi2Ppf,
+    GammaPdf,
+    GammaCdf,
+    GammaPpf,
+    BetaPdf,
+    BetaCdf,
+    BetaPpf,
+    PoissonPmf,
+    PoissonCdf,
+    BinomPmf,
+    BinomCdf,
     Entropy,
     Zscore,
     Rankdata,
@@ -85,7 +117,9 @@ enum Op {
     Simpson,
     CumulativeTrapezoid,
     Quad,
+    Dblquad,
     SolveIvp,
+    SolveIvpRk23,
 }
 
 impl Op {
@@ -117,6 +151,34 @@ impl Op {
             "norm_pdf" => Self::NormPdf,
             "norm_cdf" => Self::NormCdf,
             "norm_ppf" => Self::NormPpf,
+            "uniform_pdf" => Self::UniformPdf,
+            "uniform_cdf" => Self::UniformCdf,
+            "uniform_ppf" => Self::UniformPpf,
+            "expon_pdf" => Self::ExponPdf,
+            "expon_cdf" => Self::ExponCdf,
+            "expon_ppf" => Self::ExponPpf,
+            "laplace_pdf" => Self::LaplacePdf,
+            "laplace_cdf" => Self::LaplaceCdf,
+            "laplace_ppf" => Self::LaplacePpf,
+            "logistic_pdf" => Self::LogisticPdf,
+            "logistic_cdf" => Self::LogisticCdf,
+            "logistic_ppf" => Self::LogisticPpf,
+            "t_pdf" => Self::TPdf,
+            "t_cdf" => Self::TCdf,
+            "t_ppf" => Self::TPpf,
+            "chi2_pdf" => Self::Chi2Pdf,
+            "chi2_cdf" => Self::Chi2Cdf,
+            "chi2_ppf" => Self::Chi2Ppf,
+            "gamma_pdf" => Self::GammaPdf,
+            "gamma_cdf" => Self::GammaCdf,
+            "gamma_ppf" => Self::GammaPpf,
+            "beta_pdf" => Self::BetaPdf,
+            "beta_cdf" => Self::BetaCdf,
+            "beta_ppf" => Self::BetaPpf,
+            "poisson_pmf" => Self::PoissonPmf,
+            "poisson_cdf" => Self::PoissonCdf,
+            "binom_pmf" => Self::BinomPmf,
+            "binom_cdf" => Self::BinomCdf,
             "entropy" => Self::Entropy,
             "zscore" => Self::Zscore,
             "rankdata" => Self::Rankdata,
@@ -156,7 +218,9 @@ impl Op {
             "simpson" => Self::Simpson,
             "cumulative_trapezoid" => Self::CumulativeTrapezoid,
             "quad" => Self::Quad,
+            "dblquad" => Self::Dblquad,
             "solve_ivp" => Self::SolveIvp,
+            "solve_ivp_rk23" => Self::SolveIvpRk23,
             other => return Err(format!("unknown op '{other}'")),
         })
     }
@@ -189,6 +253,34 @@ impl Op {
             Self::NormPdf => "norm_pdf",
             Self::NormCdf => "norm_cdf",
             Self::NormPpf => "norm_ppf",
+            Self::UniformPdf => "uniform_pdf",
+            Self::UniformCdf => "uniform_cdf",
+            Self::UniformPpf => "uniform_ppf",
+            Self::ExponPdf => "expon_pdf",
+            Self::ExponCdf => "expon_cdf",
+            Self::ExponPpf => "expon_ppf",
+            Self::LaplacePdf => "laplace_pdf",
+            Self::LaplaceCdf => "laplace_cdf",
+            Self::LaplacePpf => "laplace_ppf",
+            Self::LogisticPdf => "logistic_pdf",
+            Self::LogisticCdf => "logistic_cdf",
+            Self::LogisticPpf => "logistic_ppf",
+            Self::TPdf => "t_pdf",
+            Self::TCdf => "t_cdf",
+            Self::TPpf => "t_ppf",
+            Self::Chi2Pdf => "chi2_pdf",
+            Self::Chi2Cdf => "chi2_cdf",
+            Self::Chi2Ppf => "chi2_ppf",
+            Self::GammaPdf => "gamma_pdf",
+            Self::GammaCdf => "gamma_cdf",
+            Self::GammaPpf => "gamma_ppf",
+            Self::BetaPdf => "beta_pdf",
+            Self::BetaCdf => "beta_cdf",
+            Self::BetaPpf => "beta_ppf",
+            Self::PoissonPmf => "poisson_pmf",
+            Self::PoissonCdf => "poisson_cdf",
+            Self::BinomPmf => "binom_pmf",
+            Self::BinomCdf => "binom_cdf",
             Self::Entropy => "entropy",
             Self::Zscore => "zscore",
             Self::Rankdata => "rankdata",
@@ -228,7 +320,9 @@ impl Op {
             Self::Simpson => "simpson",
             Self::CumulativeTrapezoid => "cumulative_trapezoid",
             Self::Quad => "quad",
+            Self::Dblquad => "dblquad",
             Self::SolveIvp => "solve_ivp",
+            Self::SolveIvpRk23 => "solve_ivp_rk23",
         }
     }
 }
@@ -407,6 +501,13 @@ fn median_u64(samples: &[u64]) -> u64 {
     } else {
         (s[n / 2 - 1] + s[n / 2]) / 2
     }
+}
+
+fn floor_counts(n: usize, seed: u64, hi: f64) -> NdArray {
+    let raw = seeded_uniform(&[n], seed, 0.0, hi);
+    let c = raw.to_contiguous();
+    let data: Vec<f64> = c.as_slice().unwrap().iter().map(|x| x.floor()).collect();
+    NdArray::from_vec(data)
 }
 
 fn checksum_array(a: &NdArray) -> f64 {
@@ -725,6 +826,302 @@ fn run_op(op: &Op, size: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(norm_ppf(&a));
+                }),
+            )
+        }
+        Op::UniformPdf => {
+            let a = seeded_uniform(&[n], seed, -0.5, 1.5);
+            let checksum = checksum_array(&uniform_pdf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(uniform_pdf(&a));
+                }),
+            )
+        }
+        Op::UniformCdf => {
+            let a = seeded_uniform(&[n], seed, -0.5, 1.5);
+            let checksum = checksum_array(&uniform_cdf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(uniform_cdf(&a));
+                }),
+            )
+        }
+        Op::UniformPpf => {
+            let a = seeded_uniform(&[n], seed, 0.05, 0.95);
+            let checksum = checksum_array(&uniform_ppf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(uniform_ppf(&a));
+                }),
+            )
+        }
+        Op::ExponPdf => {
+            let a = seeded_uniform(&[n], seed, -1.0, 5.0);
+            let checksum = checksum_array(&expon_pdf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(expon_pdf(&a));
+                }),
+            )
+        }
+        Op::ExponCdf => {
+            let a = seeded_uniform(&[n], seed, -1.0, 5.0);
+            let checksum = checksum_array(&expon_cdf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(expon_cdf(&a));
+                }),
+            )
+        }
+        Op::ExponPpf => {
+            let a = seeded_uniform(&[n], seed, 0.05, 0.95);
+            let checksum = checksum_array(&expon_ppf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(expon_ppf(&a));
+                }),
+            )
+        }
+        Op::LaplacePdf => {
+            let a = seeded_uniform(&[n], seed, -3.0, 3.0);
+            let checksum = checksum_array(&laplace_pdf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(laplace_pdf(&a));
+                }),
+            )
+        }
+        Op::LaplaceCdf => {
+            let a = seeded_uniform(&[n], seed, -3.0, 3.0);
+            let checksum = checksum_array(&laplace_cdf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(laplace_cdf(&a));
+                }),
+            )
+        }
+        Op::LaplacePpf => {
+            let a = seeded_uniform(&[n], seed, 0.05, 0.95);
+            let checksum = checksum_array(&laplace_ppf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(laplace_ppf(&a));
+                }),
+            )
+        }
+        Op::LogisticPdf => {
+            let a = seeded_uniform(&[n], seed, -3.0, 3.0);
+            let checksum = checksum_array(&logistic_pdf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(logistic_pdf(&a));
+                }),
+            )
+        }
+        Op::LogisticCdf => {
+            let a = seeded_uniform(&[n], seed, -3.0, 3.0);
+            let checksum = checksum_array(&logistic_cdf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(logistic_cdf(&a));
+                }),
+            )
+        }
+        Op::LogisticPpf => {
+            let a = seeded_uniform(&[n], seed, 0.05, 0.95);
+            let checksum = checksum_array(&logistic_ppf(&a));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(logistic_ppf(&a));
+                }),
+            )
+        }
+        Op::TPdf => {
+            let a = seeded_uniform(&[n], seed, -3.0, 3.0);
+            let df = 5.0;
+            let checksum = checksum_array(&t_pdf(&a, df));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(t_pdf(&a, df));
+                }),
+            )
+        }
+        Op::TCdf => {
+            let a = seeded_uniform(&[n], seed, -3.0, 3.0);
+            let df = 5.0;
+            let checksum = checksum_array(&t_cdf(&a, df));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(t_cdf(&a, df));
+                }),
+            )
+        }
+        Op::TPpf => {
+            let a = seeded_uniform(&[n], seed, 0.05, 0.95);
+            let df = 5.0;
+            let checksum = checksum_array(&t_ppf(&a, df));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(t_ppf(&a, df));
+                }),
+            )
+        }
+        Op::Chi2Pdf => {
+            let a = seeded_uniform(&[n], seed, 0.1, 20.0);
+            let df = 5.0;
+            let checksum = checksum_array(&chi2_pdf(&a, df));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(chi2_pdf(&a, df));
+                }),
+            )
+        }
+        Op::Chi2Cdf => {
+            let a = seeded_uniform(&[n], seed, 0.1, 20.0);
+            let df = 5.0;
+            let checksum = checksum_array(&chi2_cdf(&a, df));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(chi2_cdf(&a, df));
+                }),
+            )
+        }
+        Op::Chi2Ppf => {
+            let a = seeded_uniform(&[n], seed, 0.05, 0.95);
+            let df = 5.0;
+            let checksum = checksum_array(&chi2_ppf(&a, df));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(chi2_ppf(&a, df));
+                }),
+            )
+        }
+        Op::GammaPdf => {
+            let a = seeded_uniform(&[n], seed, 0.1, 10.0);
+            let shape = 2.0;
+            let checksum = checksum_array(&gamma_pdf_shape(&a, shape));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(gamma_pdf_shape(&a, shape));
+                }),
+            )
+        }
+        Op::GammaCdf => {
+            let a = seeded_uniform(&[n], seed, 0.1, 10.0);
+            let shape = 2.0;
+            let checksum = checksum_array(&gamma_cdf_shape(&a, shape));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(gamma_cdf_shape(&a, shape));
+                }),
+            )
+        }
+        Op::GammaPpf => {
+            let a = seeded_uniform(&[n], seed, 0.05, 0.95);
+            let shape = 2.0;
+            let checksum = checksum_array(&gamma_ppf_shape(&a, shape));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(gamma_ppf_shape(&a, shape));
+                }),
+            )
+        }
+        Op::BetaPdf => {
+            let a = seeded_uniform(&[n], seed, 0.05, 0.95);
+            let (aa, bb) = (2.0, 5.0);
+            let checksum = checksum_array(&beta_pdf(&a, aa, bb));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(beta_pdf(&a, aa, bb));
+                }),
+            )
+        }
+        Op::BetaCdf => {
+            let a = seeded_uniform(&[n], seed, 0.05, 0.95);
+            let (aa, bb) = (2.0, 5.0);
+            let checksum = checksum_array(&beta_cdf(&a, aa, bb));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(beta_cdf(&a, aa, bb));
+                }),
+            )
+        }
+        Op::BetaPpf => {
+            let a = seeded_uniform(&[n], seed, 0.05, 0.95);
+            let (aa, bb) = (2.0, 5.0);
+            let checksum = checksum_array(&beta_ppf(&a, aa, bb));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(beta_ppf(&a, aa, bb));
+                }),
+            )
+        }
+        Op::PoissonPmf => {
+            let a = floor_counts(n, seed, 12.0);
+            let mu = 3.0;
+            let checksum = checksum_array(&poisson_pmf(&a, mu));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(poisson_pmf(&a, mu));
+                }),
+            )
+        }
+        Op::PoissonCdf => {
+            let a = floor_counts(n, seed, 12.0);
+            let mu = 3.0;
+            let checksum = checksum_array(&poisson_cdf(&a, mu));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(poisson_cdf(&a, mu));
+                }),
+            )
+        }
+        Op::BinomPmf => {
+            let a = floor_counts(n, seed, 10.0);
+            let (nn, p) = (10.0, 0.3);
+            let checksum = checksum_array(&binom_pmf(&a, nn, p));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(binom_pmf(&a, nn, p));
+                }),
+            )
+        }
+        Op::BinomCdf => {
+            let a = floor_counts(n, seed, 10.0);
+            let (nn, p) = (10.0, 0.3);
+            let checksum = checksum_array(&binom_cdf(&a, nn, p));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(binom_cdf(&a, nn, p));
                 }),
             )
         }
@@ -1164,6 +1561,23 @@ fn run_op(op: &Op, size: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 }),
             )
         }
+        Op::Dblquad => {
+            // ∫_0^1 ∫_0^{1-x} (x+y) dy dx = 1/3
+            let (checksum, _) = dblquad(|y, x| x + y, 0.0, 1.0, |_| 0.0, |x| 1.0 - x, 1e-8);
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(dblquad(
+                        |y, x| x + y,
+                        0.0,
+                        1.0,
+                        |_| 0.0,
+                        |x| 1.0 - x,
+                        1e-8,
+                    ));
+                }),
+            )
+        }
         Op::SolveIvp => {
             // Harmonic oscillator: y'' = -y → [y, v], y'=v, v'=-y
             let n_pts = (n / 4).max(11);
@@ -1182,6 +1596,33 @@ fn run_op(op: &Op, size: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(solve_ivp_rk45(
+                        |_t, y| vec![y[1], -y[0]],
+                        (0.0, tf),
+                        &[1.0, 0.0],
+                        &t_eval,
+                        1e-6,
+                        1e-9,
+                    ));
+                }),
+            )
+        }
+        Op::SolveIvpRk23 => {
+            let n_pts = (n / 4).max(11);
+            let t_eval: Vec<f64> = (0..n_pts).map(|i| i as f64 * 0.1).collect();
+            let tf = t_eval[t_eval.len() - 1];
+            let r = solve_ivp_rk23(
+                |_t, y| vec![y[1], -y[0]],
+                (0.0, tf),
+                &[1.0, 0.0],
+                &t_eval,
+                1e-6,
+                1e-9,
+            );
+            let checksum = r.y_sum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(solve_ivp_rk23(
                         |_t, y| vec![y[1], -y[0]],
                         (0.0, tf),
                         &[1.0, 0.0],

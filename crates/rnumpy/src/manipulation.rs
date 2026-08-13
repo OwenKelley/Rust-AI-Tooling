@@ -61,6 +61,21 @@ pub fn moveaxis(a: &NdArray, source: usize, destination: usize) -> NdArray {
     a.permute_axes_view(&order)
 }
 
+/// `np.expand_dims(a, axis)` — O(1) strided view.
+pub fn expand_dims(a: &NdArray, axis: usize) -> NdArray {
+    a.expand_dims_view(axis)
+}
+
+/// `np.squeeze(a, axis=…)` — O(1) strided view.
+pub fn squeeze(a: &NdArray, axis: Option<usize>) -> NdArray {
+    a.squeeze_view(axis)
+}
+
+/// Select one index along `axis` (NumPy integer indexing) — O(1) strided view.
+pub fn index_axis(a: &NdArray, axis: usize, index: usize) -> NdArray {
+    a.index_axis_view(axis, index)
+}
+
 /// Resolve a reshape spec that may contain a single `-1` (NumPy inference).
 pub fn resolve_reshape(size: usize, newshape: &[isize]) -> Vec<usize> {
     let mut unknown = None;
@@ -306,6 +321,17 @@ mod tests {
             b.as_slice().unwrap(),
             &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
         );
+    }
+
+    #[test]
+    fn expand_dims_squeeze_index_axis() {
+        let a = NdArray::from_shape_vec(&[2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let e = expand_dims(&a, 0);
+        assert_eq!(e.shape(), &[1, 2, 3]);
+        let s = squeeze(&e, Some(0));
+        assert_eq!(s.shape(), &[2, 3]);
+        let col = index_axis(&a, 1, 2);
+        assert_eq!(col.to_contiguous().as_slice().unwrap(), &[3.0, 6.0]);
     }
 
     #[test]

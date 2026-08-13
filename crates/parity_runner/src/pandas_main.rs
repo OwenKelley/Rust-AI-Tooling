@@ -8,9 +8,10 @@ use std::time::Instant;
 
 use rnumpy::{seeded_uniform, NdArray};
 use rpandas::{
-    describe, dropna, fillna, filter_gt, groupby_agg, mean, melt, merge, pivot_table, read_csv_str,
-    rolling_mean, rolling_mean_frame, sort_values, sum, to_csv_string, Agg, Column, DataFrame,
-    MergeHow,
+    apply_f64, categorical_codes, date_range, describe, dropna, fillna, filter_gt, groupby_agg, mean,
+    melt, merge, merge_on, pivot_table, read_csv_str, read_ipc_bytes, resample_mean_index,
+    resample_sum_index, rolling_mean, rolling_mean_frame, sort_values, sum, to_csv_string,
+    to_ipc_bytes, Agg, Column, DataFrame, Freq, MergeHow,
 };
 
 #[derive(Debug, Clone)]
@@ -28,10 +29,17 @@ enum Op {
     GroupbySum,
     MergeInner,
     MergeLeft,
+    MergeMultiInner,
+    MergeOuter,
     CsvRoundtrip,
+    IpcRoundtrip,
     Melt,
     PivotSum,
     RollingMean,
+    ResampleMean,
+    ResampleSum,
+    SeriesApply,
+    CategoricalCodes,
     MixedDtypes,
 }
 
@@ -51,10 +59,17 @@ impl Op {
             "groupby_sum" => Self::GroupbySum,
             "merge_inner" => Self::MergeInner,
             "merge_left" => Self::MergeLeft,
+            "merge_multi_inner" => Self::MergeMultiInner,
+            "merge_outer" => Self::MergeOuter,
             "csv_roundtrip" => Self::CsvRoundtrip,
+            "ipc_roundtrip" => Self::IpcRoundtrip,
             "melt" => Self::Melt,
             "pivot_sum" => Self::PivotSum,
             "rolling_mean" => Self::RollingMean,
+            "resample_mean" => Self::ResampleMean,
+            "resample_sum" => Self::ResampleSum,
+            "series_apply" => Self::SeriesApply,
+            "categorical_codes" => Self::CategoricalCodes,
             "mixed_dtypes" => Self::MixedDtypes,
             other => return Err(format!("unknown op '{other}'")),
         })
@@ -75,10 +90,17 @@ impl Op {
             Self::GroupbySum => "groupby_sum",
             Self::MergeInner => "merge_inner",
             Self::MergeLeft => "merge_left",
+            Self::MergeMultiInner => "merge_multi_inner",
+            Self::MergeOuter => "merge_outer",
             Self::CsvRoundtrip => "csv_roundtrip",
+            Self::IpcRoundtrip => "ipc_roundtrip",
             Self::Melt => "melt",
             Self::PivotSum => "pivot_sum",
             Self::RollingMean => "rolling_mean",
+            Self::ResampleMean => "resample_mean",
+            Self::ResampleSum => "resample_sum",
+            Self::SeriesApply => "series_apply",
+            Self::CategoricalCodes => "categorical_codes",
             Self::MixedDtypes => "mixed_dtypes",
         }
     }
@@ -258,6 +280,35 @@ fn merge_frames(n: usize, seed: u64) -> (DataFrame, DataFrame) {
     (left, right)
 }
 
+fn merge_multi_frames(n: usize, seed: u64) -> (DataFrame, DataFrame) {
+    let n = n.max(8);
+    let a_l: Vec<f64> = (0..n).map(|i| (i % 4) as f64).collect();
+    let b_l: Vec<f64> = (0..n).map(|i| (i % 3) as f64).collect();
+    let v = seeded_uniform(&[n], seed, -1.0, 1.0);
+    let left = DataFrame::from_columns(vec![
+        ("a".into(), Column::Float64(NdArray::from_vec(a_l))),
+        ("b".into(), Column::Float64(NdArray::from_vec(b_l))),
+        (
+            "v".into(),
+            Column::Float64(NdArray::from_vec(v.to_contiguous().as_slice().unwrap().to_vec())),
+        ),
+    ]);
+
+    let m = n + n / 2;
+    let a_r: Vec<f64> = (0..m).map(|i| (i % 4) as f64).collect();
+    let b_r: Vec<f64> = (0..m).map(|i| ((i + 1) % 3) as f64).collect();
+    let w = seeded_uniform(&[m], seed + 1, -1.0, 1.0);
+    let right = DataFrame::from_columns(vec![
+        ("a".into(), Column::Float64(NdArray::from_vec(a_r))),
+        ("b".into(), Column::Float64(NdArray::from_vec(b_r))),
+        (
+            "w".into(),
+            Column::Float64(NdArray::from_vec(w.to_contiguous().as_slice().unwrap().to_vec())),
+        ),
+    ]);
+    (left, right)
+}
+
 fn pivot_source(n: usize, seed: u64) -> DataFrame {
     let n = n.max(8);
     let vals = seeded_uniform(&[n], seed, -1.0, 1.0);
@@ -317,6 +368,25 @@ fn mixed_frame(n: usize, seed: u64) -> DataFrame {
             },
         ),
     ])
+}
+
+fn cat_frame(n: usize, _seed: u64) -> DataFrame {
+    let labels = ["blue", "green", "red"];
+    let mut values = Vec::with_capacity(n);
+    let mut nulls = Vec::with_capacity(n);
+    for i in 0..n {
+        if i % 7 == 0 {
+            values.push(String::new());
+            nulls.push(true);
+        } else {
+            values.push(labels[i % 3].to_string());
+            nulls.push(false);
+        }
+    }
+    DataFrame::from_columns(vec![(
+        "s".into(),
+        Column::Utf8 { values, nulls },
+    )])
 }
 
 fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
@@ -452,6 +522,26 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 }),
             )
         }
+        Op::MergeMultiInner => {
+            let (left, right) = merge_multi_frames(n, seed);
+            let checksum = merge_on(&left, &right, &["a", "b"], MergeHow::Inner).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(merge_on(&left, &right, &["a", "b"], MergeHow::Inner));
+                }),
+            )
+        }
+        Op::MergeOuter => {
+            let (left, right) = merge_frames(n, seed);
+            let checksum = merge(&left, &right, "k", MergeHow::Outer).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(merge(&left, &right, "k", MergeHow::Outer));
+                }),
+            )
+        }
         Op::CsvRoundtrip => {
             let df = numeric_frame(n, seed, 3);
             let text = to_csv_string(&df);
@@ -461,6 +551,18 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 Box::new(move || {
                     let t = to_csv_string(&df);
                     std::hint::black_box(read_csv_str(&t));
+                }),
+            )
+        }
+        Op::IpcRoundtrip => {
+            let df = mixed_frame(n, seed);
+            let bytes = to_ipc_bytes(&df);
+            let checksum = read_ipc_bytes(&bytes).checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    let b = to_ipc_bytes(&df);
+                    std::hint::black_box(read_ipc_bytes(&b));
                 }),
             )
         }
@@ -494,6 +596,60 @@ fn run_op(op: &Op, n: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(rolling_mean_frame(&df, window));
+                }),
+            )
+        }
+        Op::ResampleMean => {
+            let n = n.max(48);
+            let df = numeric_frame(n, seed, 1);
+            // 2020-01-01T00:00:00 naive as epoch ns (UTC midnight)
+            let start = 1_577_836_800_000_000_000i64;
+            let idx = date_range(start, n, Freq::H);
+            let df = df.set_index(idx);
+            let out = resample_mean_index(&df, Freq::D);
+            let checksum = out.checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(resample_mean_index(&df, Freq::D));
+                }),
+            )
+        }
+        Op::ResampleSum => {
+            let n = n.max(48);
+            let df = numeric_frame(n, seed, 1);
+            let start = 1_577_836_800_000_000_000i64;
+            let idx = date_range(start, n, Freq::H);
+            let df = df.set_index(idx);
+            let out = resample_sum_index(&df, Freq::D);
+            let checksum = out.checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(resample_sum_index(&df, Freq::D));
+                }),
+            )
+        }
+        Op::SeriesApply => {
+            let df = numeric_frame(n, seed, 1);
+            let s = apply_f64(&df, "c0", |x| x * x);
+            let out = DataFrame::from_columns(vec![("c0".into(), s.data)]);
+            let checksum = out.checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(apply_f64(&df, "c0", |x| x * x));
+                }),
+            )
+        }
+        Op::CategoricalCodes => {
+            let df = cat_frame(n, seed);
+            let out = categorical_codes(&df, "s");
+            let checksum = out.checksum();
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(categorical_codes(&df, "s"));
                 }),
             )
         }

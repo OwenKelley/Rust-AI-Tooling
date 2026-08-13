@@ -2,7 +2,7 @@
 
 use rnumpy::NdArray;
 
-use crate::index::RangeIndex;
+use crate::index::Index;
 use crate::series::Series;
 
 /// Column payload.
@@ -245,7 +245,7 @@ impl Column {
 /// `pandas.DataFrame` analogue (column-oriented).
 #[derive(Debug, Clone)]
 pub struct DataFrame {
-    pub index: RangeIndex,
+    pub index: Index,
     columns: Vec<(String, Column)>,
 }
 
@@ -253,7 +253,7 @@ impl DataFrame {
     /// Empty frame.
     pub fn new() -> Self {
         Self {
-            index: RangeIndex::new(0),
+            index: Index::range(0),
             columns: Vec::new(),
         }
     }
@@ -275,7 +275,7 @@ impl DataFrame {
             n
         };
         Self {
-            index: RangeIndex::new(nrows),
+            index: Index::range(nrows),
             columns: cols,
         }
     }
@@ -360,6 +360,20 @@ impl DataFrame {
         self
     }
 
+    /// `df.set_index(DatetimeIndex)` — replace the row index (length must match).
+    pub fn set_index(mut self, index: impl Into<Index>) -> Self {
+        let index = index.into();
+        assert_eq!(
+            index.len(),
+            self.nrows(),
+            "set_index: length {} != nrows {}",
+            index.len(),
+            self.nrows()
+        );
+        self.index = index;
+        self
+    }
+
     /// `df.head(n)`.
     pub fn head(&self, n: usize) -> DataFrame {
         let end = n.min(self.nrows());
@@ -380,7 +394,7 @@ impl DataFrame {
             .map(|(n, c)| (n.clone(), c.slice_rows(start, end)))
             .collect();
         DataFrame {
-            index: RangeIndex::reindex(end.saturating_sub(start)),
+            index: self.index.slice_rows(start, end),
             columns: cols,
         }
     }
@@ -392,7 +406,7 @@ impl DataFrame {
             .map(|(n, c)| (n.clone(), c.take_rows(indices)))
             .collect();
         DataFrame {
-            index: RangeIndex::reindex(indices.len()),
+            index: self.index.take_rows(indices),
             columns: cols,
         }
     }

@@ -28,10 +28,17 @@ OPS = [
     "groupby_sum",
     "merge_inner",
     "merge_left",
+    "merge_multi_inner",
+    "merge_outer",
     "csv_roundtrip",
+    "ipc_roundtrip",
     "melt",
     "pivot_sum",
     "rolling_mean",
+    "resample_mean",
+    "resample_sum",
+    "series_apply",
+    "categorical_codes",
     "mixed_dtypes",
 ]
 
@@ -110,9 +117,19 @@ def nearly_equal(a: float, b: float, rtol: float, atol: float) -> bool:
 
 
 def tolerances(op: str) -> tuple[float, float]:
-    if op in ("describe", "mean", "groupby_sum", "rolling_mean", "pivot_sum"):
+    if op in (
+        "describe",
+        "mean",
+        "groupby_sum",
+        "rolling_mean",
+        "pivot_sum",
+        "resample_mean",
+        "resample_sum",
+        "pivot_sum",
+        "series_apply",
+    ):
         return 1e-6, 1e-7
-    if op in ("csv_roundtrip",):
+    if op in ("csv_roundtrip", "ipc_roundtrip"):
         return 1e-5, 1e-6
     return 1e-7, 1e-8
 

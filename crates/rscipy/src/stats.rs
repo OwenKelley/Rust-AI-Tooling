@@ -3,7 +3,7 @@
 //! Local implementations only. Continuous distributions reuse `special::ndtr` /
 //! `ndtri` where applicable.
 
-use crate::special::{ndtr_scalar, ndtri_scalar};
+use crate::special::{gammaln_scalar, ndtr_scalar, ndtri_scalar};
 use rnumpy::NdArray;
 
 fn contig(a: &NdArray) -> NdArray {
@@ -74,6 +74,612 @@ pub fn norm_cdf(a: &NdArray) -> NdArray {
 /// `scipy.stats.norm.ppf` (elementwise, loc=0, scale=1).
 pub fn norm_ppf(a: &NdArray) -> NdArray {
     map_contig(a, norm_ppf_scalar)
+}
+
+// --- uniform (scipy.stats.uniform, loc=0, scale=1 → U[0,1]) ---
+
+/// `scipy.stats.uniform.pdf(x, loc=0, scale=1)`.
+pub fn uniform_pdf_scalar(x: f64) -> f64 {
+    if (0.0..=1.0).contains(&x) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+pub fn uniform_pdf_scalar_ls(x: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "uniform.pdf: scale must be > 0");
+    uniform_pdf_scalar((x - loc) / scale) / scale
+}
+
+/// `scipy.stats.uniform.cdf(x, loc=0, scale=1)`.
+pub fn uniform_cdf_scalar(x: f64) -> f64 {
+    if x < 0.0 {
+        0.0
+    } else if x > 1.0 {
+        1.0
+    } else {
+        x
+    }
+}
+
+pub fn uniform_cdf_scalar_ls(x: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "uniform.cdf: scale must be > 0");
+    uniform_cdf_scalar((x - loc) / scale)
+}
+
+/// `scipy.stats.uniform.ppf(p, loc=0, scale=1)`.
+pub fn uniform_ppf_scalar(p: f64) -> f64 {
+    assert!((0.0..=1.0).contains(&p), "uniform.ppf: p in [0,1]");
+    p
+}
+
+pub fn uniform_ppf_scalar_ls(p: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "uniform.ppf: scale must be > 0");
+    loc + scale * uniform_ppf_scalar(p)
+}
+
+pub fn uniform_pdf(a: &NdArray) -> NdArray {
+    map_contig(a, uniform_pdf_scalar)
+}
+
+pub fn uniform_cdf(a: &NdArray) -> NdArray {
+    map_contig(a, uniform_cdf_scalar)
+}
+
+pub fn uniform_ppf(a: &NdArray) -> NdArray {
+    map_contig(a, uniform_ppf_scalar)
+}
+
+// --- expon (scipy.stats.expon, loc=0, scale=1) ---
+
+/// `scipy.stats.expon.pdf(x)` standard form.
+pub fn expon_pdf_scalar(x: f64) -> f64 {
+    if x < 0.0 {
+        0.0
+    } else {
+        (-x).exp()
+    }
+}
+
+pub fn expon_pdf_scalar_ls(x: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "expon.pdf: scale must be > 0");
+    expon_pdf_scalar((x - loc) / scale) / scale
+}
+
+pub fn expon_cdf_scalar(x: f64) -> f64 {
+    if x < 0.0 {
+        0.0
+    } else {
+        -(-x).exp_m1() // 1 - exp(-x)
+    }
+}
+
+pub fn expon_cdf_scalar_ls(x: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "expon.cdf: scale must be > 0");
+    expon_cdf_scalar((x - loc) / scale)
+}
+
+pub fn expon_ppf_scalar(p: f64) -> f64 {
+    assert!((0.0..=1.0).contains(&p), "expon.ppf: p in [0,1]");
+    if p == 1.0 {
+        return f64::INFINITY;
+    }
+    -(-p).ln_1p() // -ln(1-p)
+}
+
+pub fn expon_ppf_scalar_ls(p: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "expon.ppf: scale must be > 0");
+    loc + scale * expon_ppf_scalar(p)
+}
+
+pub fn expon_pdf(a: &NdArray) -> NdArray {
+    map_contig(a, expon_pdf_scalar)
+}
+
+pub fn expon_cdf(a: &NdArray) -> NdArray {
+    map_contig(a, expon_cdf_scalar)
+}
+
+pub fn expon_ppf(a: &NdArray) -> NdArray {
+    map_contig(a, expon_ppf_scalar)
+}
+
+// --- laplace (scipy.stats.laplace, loc=0, scale=1) ---
+
+pub fn laplace_pdf_scalar(x: f64) -> f64 {
+    0.5 * (-x.abs()).exp()
+}
+
+pub fn laplace_pdf_scalar_ls(x: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "laplace.pdf: scale must be > 0");
+    laplace_pdf_scalar((x - loc) / scale) / scale
+}
+
+pub fn laplace_cdf_scalar(x: f64) -> f64 {
+    if x < 0.0 {
+        0.5 * x.exp()
+    } else {
+        1.0 - 0.5 * (-x).exp()
+    }
+}
+
+pub fn laplace_cdf_scalar_ls(x: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "laplace.cdf: scale must be > 0");
+    laplace_cdf_scalar((x - loc) / scale)
+}
+
+pub fn laplace_ppf_scalar(p: f64) -> f64 {
+    assert!((0.0..=1.0).contains(&p), "laplace.ppf: p in [0,1]");
+    if p < 0.5 {
+        (2.0 * p).ln()
+    } else {
+        -((2.0 * (1.0 - p)).ln())
+    }
+}
+
+pub fn laplace_ppf_scalar_ls(p: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "laplace.ppf: scale must be > 0");
+    loc + scale * laplace_ppf_scalar(p)
+}
+
+pub fn laplace_pdf(a: &NdArray) -> NdArray {
+    map_contig(a, laplace_pdf_scalar)
+}
+
+pub fn laplace_cdf(a: &NdArray) -> NdArray {
+    map_contig(a, laplace_cdf_scalar)
+}
+
+pub fn laplace_ppf(a: &NdArray) -> NdArray {
+    map_contig(a, laplace_ppf_scalar)
+}
+
+// --- logistic (scipy.stats.logistic, loc=0, scale=1) ---
+
+pub fn logistic_pdf_scalar(x: f64) -> f64 {
+    // Stable form of e^{-|x|} / (1 + e^{-|x|})^2
+    let e = (-x.abs()).exp();
+    let den = 1.0 + e;
+    e / (den * den)
+}
+
+pub fn logistic_pdf_scalar_ls(x: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "logistic.pdf: scale must be > 0");
+    logistic_pdf_scalar((x - loc) / scale) / scale
+}
+
+pub fn logistic_cdf_scalar(x: f64) -> f64 {
+    // 1 / (1 + exp(-x))
+    if x >= 0.0 {
+        let e = (-x).exp();
+        1.0 / (1.0 + e)
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
+pub fn logistic_cdf_scalar_ls(x: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "logistic.cdf: scale must be > 0");
+    logistic_cdf_scalar((x - loc) / scale)
+}
+
+pub fn logistic_ppf_scalar(p: f64) -> f64 {
+    assert!((0.0..=1.0).contains(&p), "logistic.ppf: p in [0,1]");
+    // logit(p) = ln(p/(1-p))
+    if p == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if p == 1.0 {
+        return f64::INFINITY;
+    }
+    (p / (1.0 - p)).ln()
+}
+
+pub fn logistic_ppf_scalar_ls(p: f64, loc: f64, scale: f64) -> f64 {
+    assert!(scale > 0.0, "logistic.ppf: scale must be > 0");
+    loc + scale * logistic_ppf_scalar(p)
+}
+
+pub fn logistic_pdf(a: &NdArray) -> NdArray {
+    map_contig(a, logistic_pdf_scalar)
+}
+
+pub fn logistic_cdf(a: &NdArray) -> NdArray {
+    map_contig(a, logistic_cdf_scalar)
+}
+
+pub fn logistic_ppf(a: &NdArray) -> NdArray {
+    map_contig(a, logistic_ppf_scalar)
+}
+
+// --- Student-t (scipy.stats.t, loc=0, scale=1) ---
+
+/// `scipy.stats.t.pdf(x, df)`.
+pub fn t_pdf_scalar(x: f64, df: f64) -> f64 {
+    assert!(df > 0.0, "t.pdf: df must be > 0");
+    let half = 0.5 * df;
+    let log_c = gammaln_scalar(half + 0.5)
+        - gammaln_scalar(half)
+        - 0.5 * (df.ln() + std::f64::consts::PI.ln());
+    log_c.exp() * (1.0 + x * x / df).powf(-(df + 1.0) * 0.5)
+}
+
+/// `scipy.stats.t.cdf(x, df)`.
+pub fn t_cdf_scalar(x: f64, df: f64) -> f64 {
+    assert!(df > 0.0, "t.cdf: df must be > 0");
+    if x == 0.0 {
+        return 0.5;
+    }
+    let z = df / (df + x * x);
+    let ib = betainc_reg(0.5 * df, 0.5, z);
+    if x > 0.0 {
+        1.0 - 0.5 * ib
+    } else {
+        0.5 * ib
+    }
+}
+
+/// `scipy.stats.t.ppf(p, df)`.
+pub fn t_ppf_scalar(p: f64, df: f64) -> f64 {
+    assert!(df > 0.0, "t.ppf: df must be > 0");
+    assert!((0.0..=1.0).contains(&p), "t.ppf: p in [0,1]");
+    if p == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if p == 1.0 {
+        return f64::INFINITY;
+    }
+    if (p - 0.5).abs() < 1e-15 {
+        return 0.0;
+    }
+    invert_monotonic(p, -1e3, 1e3, |x| t_cdf_scalar(x, df))
+}
+
+pub fn t_pdf(a: &NdArray, df: f64) -> NdArray {
+    map_contig(a, |x| t_pdf_scalar(x, df))
+}
+
+pub fn t_cdf(a: &NdArray, df: f64) -> NdArray {
+    map_contig(a, |x| t_cdf_scalar(x, df))
+}
+
+pub fn t_ppf(a: &NdArray, df: f64) -> NdArray {
+    map_contig(a, |p| t_ppf_scalar(p, df))
+}
+
+// --- chi-square (scipy.stats.chi2) ---
+
+/// `scipy.stats.chi2.pdf(x, df)`.
+pub fn chi2_pdf_scalar(x: f64, df: f64) -> f64 {
+    assert!(df > 0.0, "chi2.pdf: df must be > 0");
+    if x < 0.0 {
+        return 0.0;
+    }
+    if x == 0.0 {
+        return if df == 2.0 {
+            0.5
+        } else if df < 2.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+    }
+    let half = 0.5 * df;
+    (-gammaln_scalar(half) - half * std::f64::consts::LN_2 + (half - 1.0) * x.ln() - 0.5 * x).exp()
+}
+
+/// `scipy.stats.chi2.cdf(x, df)`.
+pub fn chi2_cdf_scalar(x: f64, df: f64) -> f64 {
+    assert!(df > 0.0, "chi2.cdf: df must be > 0");
+    if x <= 0.0 {
+        return 0.0;
+    }
+    gammainc_reg(0.5 * df, 0.5 * x)
+}
+
+/// `scipy.stats.chi2.ppf(p, df)`.
+pub fn chi2_ppf_scalar(p: f64, df: f64) -> f64 {
+    assert!(df > 0.0, "chi2.ppf: df must be > 0");
+    assert!((0.0..=1.0).contains(&p), "chi2.ppf: p in [0,1]");
+    if p == 0.0 {
+        return 0.0;
+    }
+    if p == 1.0 {
+        return f64::INFINITY;
+    }
+    invert_monotonic(p, 0.0, (df + 40.0) * 4.0, |x| chi2_cdf_scalar(x, df))
+}
+
+pub fn chi2_pdf(a: &NdArray, df: f64) -> NdArray {
+    map_contig(a, |x| chi2_pdf_scalar(x, df))
+}
+
+pub fn chi2_cdf(a: &NdArray, df: f64) -> NdArray {
+    map_contig(a, |x| chi2_cdf_scalar(x, df))
+}
+
+pub fn chi2_ppf(a: &NdArray, df: f64) -> NdArray {
+    map_contig(a, |p| chi2_ppf_scalar(p, df))
+}
+
+// --- gamma (scipy.stats.gamma, a=shape, loc=0, scale=1) ---
+
+/// `scipy.stats.gamma.pdf(x, a)`.
+pub fn gamma_pdf_scalar(x: f64, shape: f64) -> f64 {
+    assert!(shape > 0.0, "gamma.pdf: a must be > 0");
+    if x < 0.0 {
+        return 0.0;
+    }
+    if x == 0.0 {
+        return if shape == 1.0 {
+            1.0
+        } else if shape < 1.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+    }
+    (-gammaln_scalar(shape) + (shape - 1.0) * x.ln() - x).exp()
+}
+
+/// `scipy.stats.gamma.cdf(x, a)`.
+pub fn gamma_cdf_scalar(x: f64, shape: f64) -> f64 {
+    assert!(shape > 0.0, "gamma.cdf: a must be > 0");
+    if x <= 0.0 {
+        return 0.0;
+    }
+    gammainc_reg(shape, x)
+}
+
+/// `scipy.stats.gamma.ppf(p, a)`.
+pub fn gamma_ppf_scalar(p: f64, shape: f64) -> f64 {
+    assert!(shape > 0.0, "gamma.ppf: a must be > 0");
+    assert!((0.0..=1.0).contains(&p), "gamma.ppf: p in [0,1]");
+    if p == 0.0 {
+        return 0.0;
+    }
+    if p == 1.0 {
+        return f64::INFINITY;
+    }
+    invert_monotonic(p, 0.0, (shape + 40.0) * 4.0, |x| gamma_cdf_scalar(x, shape))
+}
+
+pub fn gamma_pdf_shape(a: &NdArray, shape: f64) -> NdArray {
+    map_contig(a, |x| gamma_pdf_scalar(x, shape))
+}
+
+pub fn gamma_cdf_shape(a: &NdArray, shape: f64) -> NdArray {
+    map_contig(a, |x| gamma_cdf_scalar(x, shape))
+}
+
+pub fn gamma_ppf_shape(a: &NdArray, shape: f64) -> NdArray {
+    map_contig(a, |p| gamma_ppf_scalar(p, shape))
+}
+
+// --- beta (scipy.stats.beta, loc=0, scale=1) ---
+
+/// `scipy.stats.beta.pdf(x, a, b)`.
+pub fn beta_pdf_scalar(x: f64, a: f64, b: f64) -> f64 {
+    assert!(a > 0.0 && b > 0.0, "beta.pdf: a,b must be > 0");
+    if x < 0.0 || x > 1.0 {
+        return 0.0;
+    }
+    if x == 0.0 || x == 1.0 {
+        // Boundary behavior matches SciPy for a,b > 1 → 0.
+        if (x == 0.0 && a < 1.0) || (x == 1.0 && b < 1.0) {
+            return f64::INFINITY;
+        }
+        if (x == 0.0 && a == 1.0) || (x == 1.0 && b == 1.0) {
+            // fall through
+        } else if (x == 0.0 && a > 1.0) || (x == 1.0 && b > 1.0) {
+            return 0.0;
+        }
+    }
+    let log_b = gammaln_scalar(a) + gammaln_scalar(b) - gammaln_scalar(a + b);
+    ( (a - 1.0) * x.ln() + (b - 1.0) * (1.0 - x).ln() - log_b ).exp()
+}
+
+/// `scipy.stats.beta.cdf(x, a, b)`.
+pub fn beta_cdf_scalar(x: f64, a: f64, b: f64) -> f64 {
+    assert!(a > 0.0 && b > 0.0, "beta.cdf: a,b must be > 0");
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    betainc_reg(a, b, x)
+}
+
+/// `scipy.stats.beta.ppf(p, a, b)`.
+pub fn beta_ppf_scalar(p: f64, a: f64, b: f64) -> f64 {
+    assert!(a > 0.0 && b > 0.0, "beta.ppf: a,b must be > 0");
+    assert!((0.0..=1.0).contains(&p), "beta.ppf: p in [0,1]");
+    if p == 0.0 {
+        return 0.0;
+    }
+    if p == 1.0 {
+        return 1.0;
+    }
+    invert_monotonic(p, 0.0, 1.0, |x| beta_cdf_scalar(x, a, b))
+}
+
+pub fn beta_pdf(arr: &NdArray, a: f64, b: f64) -> NdArray {
+    map_contig(arr, |x| beta_pdf_scalar(x, a, b))
+}
+
+pub fn beta_cdf(arr: &NdArray, a: f64, b: f64) -> NdArray {
+    map_contig(arr, |x| beta_cdf_scalar(x, a, b))
+}
+
+pub fn beta_ppf(arr: &NdArray, a: f64, b: f64) -> NdArray {
+    map_contig(arr, |p| beta_ppf_scalar(p, a, b))
+}
+
+// --- poisson (scipy.stats.poisson) ---
+
+/// `scipy.stats.poisson.pmf(k, mu)`.
+pub fn poisson_pmf_scalar(k: f64, mu: f64) -> f64 {
+    assert!(mu >= 0.0, "poisson.pmf: mu must be >= 0");
+    if k < 0.0 || k.fract() != 0.0 {
+        return 0.0;
+    }
+    let kk = k as i64;
+    if mu == 0.0 {
+        return if kk == 0 { 1.0 } else { 0.0 };
+    }
+    // exp(k*ln(mu) - mu - gammaln(k+1))
+    (k * mu.ln() - mu - gammaln_scalar(k + 1.0)).exp()
+}
+
+/// `scipy.stats.poisson.cdf(k, mu)` (right-continuous on integers).
+pub fn poisson_cdf_scalar(k: f64, mu: f64) -> f64 {
+    assert!(mu >= 0.0, "poisson.cdf: mu must be >= 0");
+    if k < 0.0 {
+        return 0.0;
+    }
+    let kk = k.floor() as i64;
+    let mut s = 0.0;
+    for i in 0..=kk {
+        s += poisson_pmf_scalar(i as f64, mu);
+    }
+    s.clamp(0.0, 1.0)
+}
+
+pub fn poisson_pmf(a: &NdArray, mu: f64) -> NdArray {
+    map_contig(a, |k| poisson_pmf_scalar(k, mu))
+}
+
+pub fn poisson_cdf(a: &NdArray, mu: f64) -> NdArray {
+    map_contig(a, |k| poisson_cdf_scalar(k, mu))
+}
+
+// --- binom (scipy.stats.binom) ---
+
+/// `scipy.stats.binom.pmf(k, n, p)`.
+pub fn binom_pmf_scalar(k: f64, n: f64, p: f64) -> f64 {
+    assert!(n >= 0.0 && n.fract() == 0.0, "binom.pmf: n must be non-neg int");
+    assert!((0.0..=1.0).contains(&p), "binom.pmf: p in [0,1]");
+    let nn = n as i64;
+    if k < 0.0 || k > n || k.fract() != 0.0 {
+        return 0.0;
+    }
+    let kk = k as i64;
+    if p == 0.0 {
+        return if kk == 0 { 1.0 } else { 0.0 };
+    }
+    if p == 1.0 {
+        return if kk == nn { 1.0 } else { 0.0 };
+    }
+    // C(n,k) * p^k * (1-p)^(n-k)
+    let log_c = gammaln_scalar(n + 1.0) - gammaln_scalar(k + 1.0) - gammaln_scalar(n - k + 1.0);
+    (log_c + kk as f64 * p.ln() + (nn - kk) as f64 * (1.0 - p).ln()).exp()
+}
+
+/// `scipy.stats.binom.cdf(k, n, p)`.
+pub fn binom_cdf_scalar(k: f64, n: f64, p: f64) -> f64 {
+    assert!(n >= 0.0 && n.fract() == 0.0, "binom.cdf: n must be non-neg int");
+    assert!((0.0..=1.0).contains(&p), "binom.cdf: p in [0,1]");
+    if k < 0.0 {
+        return 0.0;
+    }
+    if k >= n {
+        return 1.0;
+    }
+    let kk = k.floor() as i64;
+    let mut s = 0.0;
+    for i in 0..=kk {
+        s += binom_pmf_scalar(i as f64, n, p);
+    }
+    s.clamp(0.0, 1.0)
+}
+
+pub fn binom_pmf(a: &NdArray, n: f64, p: f64) -> NdArray {
+    map_contig(a, |k| binom_pmf_scalar(k, n, p))
+}
+
+pub fn binom_cdf(a: &NdArray, n: f64, p: f64) -> NdArray {
+    map_contig(a, |k| binom_cdf_scalar(k, n, p))
+}
+
+/// Invert a rising CDF on `[lo, hi]` by bisection (with mild bracket expansion).
+fn invert_monotonic(p: f64, mut lo: f64, mut hi: f64, cdf: impl Fn(f64) -> f64) -> f64 {
+    // Expand bracket if needed (skip non-finite expansion for [0,1] beta).
+    for _ in 0..60 {
+        let flo = cdf(lo);
+        let fhi = cdf(hi);
+        if flo <= p && p <= fhi {
+            break;
+        }
+        if flo > p {
+            let width = (hi - lo).abs().max(1.0);
+            lo -= width;
+        }
+        if fhi < p {
+            let width = (hi - lo).abs().max(1.0);
+            hi += width;
+        }
+    }
+    for _ in 0..80 {
+        let mid = 0.5 * (lo + hi);
+        if cdf(mid) < p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// Lower regularized incomplete gamma P(a,x) = γ(a,x)/Γ(a).
+fn gammainc_reg(a: f64, x: f64) -> f64 {
+    assert!(a > 0.0, "gammainc: a must be > 0");
+    if x <= 0.0 {
+        return 0.0;
+    }
+    // Series for x < a+1, otherwise Q via continued fraction.
+    if x < a + 1.0 {
+        let mut ap = a;
+        let mut sum = 1.0 / a;
+        let mut del = sum;
+        for _ in 0..200 {
+            ap += 1.0;
+            del *= x / ap;
+            sum += del;
+            if del.abs() < sum.abs() * 1e-14 {
+                break;
+            }
+        }
+        (-x + a * x.ln() - gammaln_scalar(a)).exp() * sum
+    } else {
+        // Q(a,x) continued fraction; P = 1 - Q
+        let mut b = x + 1.0 - a;
+        let mut c = 1e30;
+        let mut d = 1.0 / b;
+        let mut h = d;
+        for i in 1..=200 {
+            let an = -i as f64 * (i as f64 - a);
+            b += 2.0;
+            d = an * d + b;
+            if d.abs() < 1e-30 {
+                d = 1e-30;
+            }
+            c = b + an / c;
+            if c.abs() < 1e-30 {
+                c = 1e-30;
+            }
+            d = 1.0 / d;
+            let del = d * c;
+            h *= del;
+            if (del - 1.0).abs() < 1e-14 {
+                break;
+            }
+        }
+        let q = (-x + a * x.ln() - gammaln_scalar(a)).exp() * h;
+        (1.0 - q).clamp(0.0, 1.0)
+    }
 }
 
 /// Shannon entropy — `scipy.stats.entropy(pk)` (natural log, axis=None).
@@ -427,5 +1033,65 @@ mod tests {
     fn skew_symmetric() {
         let a = NdArray::from_vec(vec![-2.0, -1.0, 0.0, 1.0, 2.0]);
         assert_close(skew(&a), 0.0, 1e-12);
+    }
+
+    #[test]
+    fn uniform_cdf_ppf_roundtrip() {
+        for p in [0.0, 0.25, 0.5, 0.9, 1.0] {
+            assert_close(uniform_ppf_scalar(uniform_cdf_scalar(p)), p, 1e-12);
+        }
+    }
+
+    #[test]
+    fn expon_cdf_ppf_roundtrip() {
+        for x in [0.0, 0.5, 1.0, 2.5] {
+            let p = expon_cdf_scalar(x);
+            assert_close(expon_ppf_scalar(p), x, 1e-12);
+        }
+    }
+
+    #[test]
+    fn laplace_pdf_symmetric() {
+        assert_close(laplace_pdf_scalar(1.5), laplace_pdf_scalar(-1.5), 1e-15);
+        assert_close(laplace_pdf_scalar(0.0), 0.5, 1e-15);
+    }
+
+    #[test]
+    fn logistic_cdf_ppf_roundtrip() {
+        for x in [-2.0, -0.5, 0.0, 1.0, 3.0] {
+            let p = logistic_cdf_scalar(x);
+            assert_close(logistic_ppf_scalar(p), x, 1e-12);
+        }
+    }
+
+    #[test]
+    fn t_chi2_gamma_beta_smoke() {
+        let df = 5.0;
+        assert!(t_pdf_scalar(0.0, df) > 0.0);
+        assert_close(t_cdf_scalar(0.0, df), 0.5, 1e-12);
+        assert_close(t_ppf_scalar(0.5, df), 0.0, 1e-6);
+
+        assert!(chi2_pdf_scalar(2.0, df) > 0.0);
+        let p = chi2_cdf_scalar(3.0, df);
+        assert_close(chi2_ppf_scalar(p, df), 3.0, 1e-4);
+
+        let a = 2.0;
+        let p = gamma_cdf_scalar(1.5, a);
+        assert_close(gamma_ppf_scalar(p, a), 1.5, 1e-4);
+
+        let p = beta_cdf_scalar(0.4, 2.0, 5.0);
+        assert_close(beta_ppf_scalar(p, 2.0, 5.0), 0.4, 1e-5);
+    }
+
+    #[test]
+    fn poisson_binom_smoke() {
+        assert_close(poisson_pmf_scalar(0.0, 0.0), 1.0, 1e-12);
+        let s: f64 = (0..=20).map(|k| poisson_pmf_scalar(k as f64, 3.0)).sum();
+        assert_close(s, 1.0, 1e-6);
+        assert!(poisson_cdf_scalar(2.0, 3.0) < poisson_cdf_scalar(5.0, 3.0));
+
+        let bs: f64 = (0..=10).map(|k| binom_pmf_scalar(k as f64, 10.0, 0.3)).sum();
+        assert_close(bs, 1.0, 1e-6);
+        assert_close(binom_cdf_scalar(10.0, 10.0, 0.3), 1.0, 1e-12);
     }
 }

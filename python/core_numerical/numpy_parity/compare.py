@@ -95,6 +95,11 @@ OPS = [
     "take_along_axis",
     "slice",
     "astype_f32",
+    "astype_i64",
+    "astype_bool",
+    "expand_dims",
+    "squeeze",
+    "index_axis",
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

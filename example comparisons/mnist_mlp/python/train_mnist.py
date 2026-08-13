@@ -110,6 +110,12 @@ def main() -> None:
     p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH)
     p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     p.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    p.add_argument(
+        "--save",
+        type=Path,
+        default=None,
+        help="If set, write a checkpoint (state_dict + metadata) to this path",
+    )
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -149,6 +155,23 @@ def main() -> None:
         f"epochs={args.epochs} batch_size={args.batch_size}",
         flush=True,
     )
+
+    if args.save is not None:
+        args.save.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "model": "mnist_mlp",
+            "hidden": HIDDEN,
+            "lr": LR,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "seed": args.seed,
+            "train_loss": last_train_loss,
+            "val_acc": last_val_acc,
+            "wall_sec": wall,
+            "state_dict": model.state_dict(),
+        }
+        torch.save(payload, args.save)
+        print(f"saved checkpoint -> {args.save.resolve()}", flush=True)
 
 
 if __name__ == "__main__":

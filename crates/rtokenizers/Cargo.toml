@@ -1,0 +1,6 @@
+[package]
+name = "rtokenizers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Thin tokenizer surface (Whitespace / BPE / WordPiece) for Rust AI tooling (std only)"

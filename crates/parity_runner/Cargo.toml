@@ -21,8 +21,28 @@ path = "src/pandas_main.rs"
 name = "torch_parity_runner"
 path = "src/torch_main.rs"
 
+[[bin]]
+name = "arrow_parity_runner"
+path = "src/arrow_main.rs"
+
+[[bin]]
+name = "polars_parity_runner"
+path = "src/polars_main.rs"
+
+[[bin]]
+name = "sklearn_parity_runner"
+path = "src/sklearn_main.rs"
+
+[[bin]]
+name = "tokenizers_parity_runner"
+path = "src/tokenizers_main.rs"
+
 [dependencies]
 rnumpy = { path = "../rnumpy" }
 rscipy = { path = "../rscipy" }
 rpandas = { path = "../rpandas" }
+rarrow = { path = "../rarrow" }
+rpolars = { path = "../rpolars" }
+rsklearn = { path = "../rsklearn" }
+rtokenizers = { path = "../rtokenizers" }
 rustorch = { path = "../rustorch" }

@@ -52,6 +52,26 @@ def merge_frames(n: int, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     return left, right
 
 
+def merge_multi_frames(n: int, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    n = max(n, 8)
+    left = pd.DataFrame(
+        {
+            "a": np.array([float(i % 4) for i in range(n)], dtype=np.float64),
+            "b": np.array([float(i % 3) for i in range(n)], dtype=np.float64),
+            "v": seeded_uniform((n,), seed, -1.0, 1.0),
+        }
+    )
+    m = n + n // 2
+    right = pd.DataFrame(
+        {
+            "a": np.array([float(i % 4) for i in range(m)], dtype=np.float64),
+            "b": np.array([float((i + 1) % 3) for i in range(m)], dtype=np.float64),
+            "w": seeded_uniform((m,), seed + 1, -1.0, 1.0),
+        }
+    )
+    return left, right
+
+
 def pivot_source(n: int, seed: int) -> pd.DataFrame:
     n = max(n, 8)
     vals = seeded_uniform((n,), seed, -1.0, 1.0)
@@ -226,6 +246,24 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
 
         return result, thunk
 
+    if op == "merge_multi_inner":
+        left, right = merge_multi_frames(n, seed)
+        result = pd.merge(left, right, on=["a", "b"], how="inner")
+
+        def thunk() -> pd.DataFrame:
+            return pd.merge(left, right, on=["a", "b"], how="inner")
+
+        return result, thunk
+
+    if op == "merge_outer":
+        left, right = merge_frames(n, seed)
+        result = pd.merge(left, right, on="k", how="outer")
+
+        def thunk() -> pd.DataFrame:
+            return pd.merge(left, right, on="k", how="outer")
+
+        return result, thunk
+
     if op == "csv_roundtrip":
         df = numeric_frame(n, seed, ncols=3)
         text = df.to_csv(index=False)
@@ -234,6 +272,17 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
         def thunk() -> pd.DataFrame:
             t = df.to_csv(index=False)
             return pd.read_csv(io.StringIO(t))
+
+        return result, thunk
+
+    if op == "ipc_roundtrip":
+        from .ipc_codec import read_ipc_bytes, to_ipc_bytes
+
+        df = mixed_frame(n, seed)
+        result = read_ipc_bytes(to_ipc_bytes(df))
+
+        def thunk() -> pd.DataFrame:
+            return read_ipc_bytes(to_ipc_bytes(df))
 
         return result, thunk
 
@@ -271,6 +320,82 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
 
         def thunk() -> pd.DataFrame:
             return pd.DataFrame({"c0": df["c0"].rolling(window).mean()})
+
+        return result, thunk
+
+    if op == "resample_mean":
+        n = max(n, 48)
+        df = numeric_frame(n, seed, ncols=1)
+        idx = pd.date_range("2020-01-01", periods=n, freq="h")
+        df = df.set_index(idx)
+
+        def _resample_mean() -> pd.DataFrame:
+            out = df.resample("D", closed="left", label="left").mean().reset_index()
+            out = out.rename(columns={out.columns[0]: "ts"})
+            out["ts"] = out["ts"].astype("int64").astype(np.float64)
+            return out
+
+        result = _resample_mean()
+
+        def thunk() -> pd.DataFrame:
+            return _resample_mean()
+
+        return result, thunk
+
+    if op == "resample_sum":
+        n = max(n, 48)
+        df = numeric_frame(n, seed, ncols=1)
+        idx = pd.date_range("2020-01-01", periods=n, freq="h")
+        df = df.set_index(idx)
+
+        def _resample_sum() -> pd.DataFrame:
+            out = df.resample("D", closed="left", label="left").sum().reset_index()
+            out = out.rename(columns={out.columns[0]: "ts"})
+            out["ts"] = out["ts"].astype("int64").astype(np.float64)
+            return out
+
+        result = _resample_sum()
+
+        def thunk() -> pd.DataFrame:
+            return _resample_sum()
+
+        return result, thunk
+
+    if op == "series_apply":
+        df = numeric_frame(n, seed, ncols=1)
+        result = pd.DataFrame({"c0": df["c0"].apply(lambda x: x * x)})
+
+        def thunk() -> pd.DataFrame:
+            return pd.DataFrame({"c0": df["c0"].apply(lambda x: x * x)})
+
+        return result, thunk
+
+    if op == "categorical_codes":
+        labels = ["blue", "green", "red"]
+        vals = []
+        for i in range(n):
+            if i % 7 == 0:
+                vals.append(None)
+            else:
+                vals.append(labels[i % 3])
+        s = pd.Series(vals, dtype="object").astype("category")
+        n_cats = float(len(s.cat.categories))
+        result = pd.DataFrame(
+            {
+                "codes": s.cat.codes.astype(np.float64),
+                "n_categories": np.full(n, n_cats, dtype=np.float64),
+            }
+        )
+
+        def thunk() -> pd.DataFrame:
+            s2 = pd.Series(vals, dtype="object").astype("category")
+            nc = float(len(s2.cat.categories))
+            return pd.DataFrame(
+                {
+                    "codes": s2.cat.codes.astype(np.float64),
+                    "n_categories": np.full(n, nc, dtype=np.float64),
+                }
+            )
 
         return result, thunk
 

@@ -1,0 +1,10 @@
+[package]
+name = "rpolars"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Polars-shaped DataFrame API for Rust (std only, on rarrow)"
+
+[dependencies]
+rarrow = { path = "../rarrow" }
+rnumpy = { path = "../rnumpy" }

@@ -7,7 +7,9 @@ and **speed**.
 SciPy slice: see [`SCIPY.md`](SCIPY.md).
 Pandas slice: see [`PANDAS.md`](PANDAS.md).
 PyTorch slice: see [`TORCH.md`](TORCH.md).
-Next slices: see [`ROADMAP.md`](ROADMAP.md).
+Arrow / Parquet slice: see [`ARROW.md`](ARROW.md).
+Phase 1 (done): [`ROADMAP.md`](ROADMAP.md).
+Phase 2 (active): [`ROADMAP_PHASE2.md`](ROADMAP_PHASE2.md).
 Speed comparisons: see [`SPEED.md`](SPEED.md).
 
 ## Layout
@@ -34,12 +36,13 @@ Speed comparisons: see [`SPEED.md`](SPEED.md).
 | `np.greater` / `less` / `equal` / `not_equal` | `rnumpy::{greater,less,equal,not_equal}` (float 0/1 masks) |
 | `np.cumsum` / `cumprod` (+ axis) | `rnumpy::{cumsum,cumsum_axis,cumprod}` |
 | `np.reshape` (incl. `-1`) | `rnumpy::{reshape,reshape_infer}` |
-| `np.swapaxes` / `moveaxis` | `rnumpy::{swapaxes,moveaxis}` |
+| `np.swapaxes` / `moveaxis` / `expand_dims` / `squeeze` | `rnumpy::{swapaxes,moveaxis,expand_dims,squeeze}` (O(1) views) |
 | `np.transpose` / `swapaxes` | O(1) strided views (`transpose_view` / `swapaxes_view`) |
+| `a[i, :]` integer axis select | `rnumpy::index_axis` (O(1) view) |
 | `a[start:stop]` slicing | `rnumpy::slice_array` / `NdArray::slice` |
 | `np.take` / `np.compress` / fancy / `take_along_axis` | `rnumpy::{take,compress,boolean_index,fancy_index_2d,take_along_axis}` |
 | `np.linalg.qr` / `svd` / `eig` / `eigvalsh` | `rnumpy::{qr,svd,svdvals,eig,eigvals,eigvalsh}` |
-| `astype(float32)` | `NdArray::astype_f32` / `NdArrayF32` |
+| `astype(float32/int64/bool)` | `NdArray::{astype_f32,astype_i64,astype_bool}` / companions |
 | `np.linalg.solve` / `inv` / `det` | `rnumpy::{solve,inv,det}` |
 | `np.sqrt` / `exp` / `log` / `sin` / `cos` / `tan` / `tanh` | `rnumpy::{sqrt,exp,log,sin,cos,tan,tanh}` |
 | `np.negative` / `abs` / `clip` | `rnumpy::{negative,abs,clip}` |
@@ -107,15 +110,11 @@ Performance work prefers **in-house `std` kernels** over extra crates:
   - Goto A/B packing reserved for very large shapes
   - no rayon / OpenBLAS / MKL
 
-Array storage is a local contiguous `NdArray` (`Vec<f64>` + shape) in
-`crates/rnumpy/src/array.rs` — no `ndarray` / BLAS crate dependency.
-
-`transpose` still materializes an owned array; NumPy often returns an O(1) view.
+Array storage is a local strided `NdArray` (`Arc<Vec<f64>>` + shape/strides)
+in `crates/rnumpy/src/array.rs` — no `ndarray` / BLAS crate dependency.
+Transpose / slice / expand_dims / squeeze / index_axis are O(1) views when legal.
 
 ## Next in Core Numerical
 
-See [`ROADMAP.md`](ROADMAP.md) for the active plan (NumPy linalg depth → SciPy
-sparse/signal → Pandas time series/Arrow → Polars/PyArrow).
-
-Still ahead for deeper NumPy parity: broader dtype coverage. After that, deepen
-SciPy/Pandas, then mirror harnesses for Polars and PyArrow.
+See [`ROADMAP.md`](ROADMAP.md) for the active plan (full Arrow via `rarrow`,
+then Polars / remaining python-ai-ml tooling).

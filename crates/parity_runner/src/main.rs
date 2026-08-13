@@ -14,12 +14,12 @@ use std::time::Instant;
 use rnumpy::{
     abs, add, arange, argmax, argmin, boolean_index, broadcast_to, ceil, clip, compress,
     concatenate, cos, cumprod, cumsum, cumsum_axis, det, divide, dot, eig, eigvals, eigvalsh, equal,
-    exp, eye, fancy_index_2d, floor, full, greater, inv, less, linspace, log, matmul, max, max_axis,
-    maximum, mean, mean_axis, min, min_axis, minimum, moveaxis, multiply, negative, norm, not_equal,
-    ones, power, qr, ravel, reciprocal, reshape, reshape_infer, round, seeded_uniform, sign, sin,
-    slice_array, solve, sqrt, square, stack, std as np_std, subtract, sum, sum_axis, svd, svdvals,
-    swapaxes, take, take_along_axis, tan, tanh, trace, transpose, trunc, var, where_, zeros,
-    AxisSlice, NdArray,
+    exp, expand_dims, eye, fancy_index_2d, floor, full, greater, index_axis, inv, less, linspace,
+    log, matmul, max, max_axis, maximum, mean, mean_axis, min, min_axis, minimum, moveaxis,
+    multiply, negative, norm, not_equal, ones, power, qr, ravel, reciprocal, reshape, reshape_infer,
+    round, seeded_uniform, sign, sin, slice_array, solve, sqrt, square, squeeze, stack,
+    std as np_std, subtract, sum, sum_axis, svd, svdvals, swapaxes, take, take_along_axis, tan,
+    tanh, trace, transpose, trunc, var, where_, zeros, AxisSlice, NdArray,
 };
 
 #[derive(Debug, Clone)]
@@ -104,6 +104,11 @@ enum Op {
     TakeAlongAxis,
     Slice,
     AstypeF32,
+    AstypeI64,
+    AstypeBool,
+    ExpandDims,
+    Squeeze,
+    IndexAxis,
 }
 
 impl Op {
@@ -189,6 +194,11 @@ impl Op {
             "take_along_axis" => Self::TakeAlongAxis,
             "slice" => Self::Slice,
             "astype_f32" => Self::AstypeF32,
+            "astype_i64" => Self::AstypeI64,
+            "astype_bool" => Self::AstypeBool,
+            "expand_dims" => Self::ExpandDims,
+            "squeeze" => Self::Squeeze,
+            "index_axis" => Self::IndexAxis,
             other => {
                 return Err(format!(
                     "unknown op '{other}' (expected snake_case NumPy name, e.g. add, matmul)"
@@ -279,6 +289,11 @@ impl Op {
             Self::TakeAlongAxis => "take_along_axis",
             Self::Slice => "slice",
             Self::AstypeF32 => "astype_f32",
+            Self::AstypeI64 => "astype_i64",
+            Self::AstypeBool => "astype_bool",
+            Self::ExpandDims => "expand_dims",
+            Self::Squeeze => "squeeze",
+            Self::IndexAxis => "index_axis",
         }
     }
 }
@@ -1382,6 +1397,57 @@ fn run_op(op: &Op, size: usize, seed: u64) -> (f64, Box<dyn FnMut()>) {
                 checksum,
                 Box::new(move || {
                     std::hint::black_box(a.astype_f32().astype_f64());
+                }),
+            )
+        }
+        Op::AstypeI64 => {
+            let a = seeded_uniform(&[n, n], seed, -10.0, 10.0);
+            let checksum = checksum_array(&a.astype_i64().astype_f64());
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(a.astype_i64().astype_f64());
+                }),
+            )
+        }
+        Op::AstypeBool => {
+            let a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let checksum = checksum_array(&a.astype_bool().astype_f64());
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(a.astype_bool().astype_f64());
+                }),
+            )
+        }
+        Op::ExpandDims => {
+            let a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let checksum = checksum_array(&expand_dims(&a, 1));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(expand_dims(&a, 1));
+                }),
+            )
+        }
+        Op::Squeeze => {
+            let a = seeded_uniform(&[n, 1, n], seed, -1.0, 1.0);
+            let checksum = checksum_array(&squeeze(&a, Some(1)));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(squeeze(&a, Some(1)));
+                }),
+            )
+        }
+        Op::IndexAxis => {
+            let a = seeded_uniform(&[n, n], seed, -1.0, 1.0);
+            let idx = n / 2;
+            let checksum = checksum_array(&index_axis(&a, 0, idx));
+            (
+                checksum,
+                Box::new(move || {
+                    std::hint::black_box(index_axis(&a, 0, idx));
                 }),
             )
         }

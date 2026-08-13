@@ -282,6 +282,230 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
 
         return thunk(), thunk
 
+    if op == "uniform_pdf":
+        a = seeded_uniform((n,), seed, -0.5, 1.5)
+
+        def thunk():
+            return stats.uniform.pdf(a)
+
+        return thunk(), thunk
+
+    if op == "uniform_cdf":
+        a = seeded_uniform((n,), seed, -0.5, 1.5)
+
+        def thunk():
+            return stats.uniform.cdf(a)
+
+        return thunk(), thunk
+
+    if op == "uniform_ppf":
+        a = seeded_uniform((n,), seed, 0.05, 0.95)
+
+        def thunk():
+            return stats.uniform.ppf(a)
+
+        return thunk(), thunk
+
+    if op == "expon_pdf":
+        a = seeded_uniform((n,), seed, -1.0, 5.0)
+
+        def thunk():
+            return stats.expon.pdf(a)
+
+        return thunk(), thunk
+
+    if op == "expon_cdf":
+        a = seeded_uniform((n,), seed, -1.0, 5.0)
+
+        def thunk():
+            return stats.expon.cdf(a)
+
+        return thunk(), thunk
+
+    if op == "expon_ppf":
+        a = seeded_uniform((n,), seed, 0.05, 0.95)
+
+        def thunk():
+            return stats.expon.ppf(a)
+
+        return thunk(), thunk
+
+    if op == "laplace_pdf":
+        a = seeded_uniform((n,), seed, -3.0, 3.0)
+
+        def thunk():
+            return stats.laplace.pdf(a)
+
+        return thunk(), thunk
+
+    if op == "laplace_cdf":
+        a = seeded_uniform((n,), seed, -3.0, 3.0)
+
+        def thunk():
+            return stats.laplace.cdf(a)
+
+        return thunk(), thunk
+
+    if op == "laplace_ppf":
+        a = seeded_uniform((n,), seed, 0.05, 0.95)
+
+        def thunk():
+            return stats.laplace.ppf(a)
+
+        return thunk(), thunk
+
+    if op == "logistic_pdf":
+        a = seeded_uniform((n,), seed, -3.0, 3.0)
+
+        def thunk():
+            return stats.logistic.pdf(a)
+
+        return thunk(), thunk
+
+    if op == "logistic_cdf":
+        a = seeded_uniform((n,), seed, -3.0, 3.0)
+
+        def thunk():
+            return stats.logistic.cdf(a)
+
+        return thunk(), thunk
+
+    if op == "logistic_ppf":
+        a = seeded_uniform((n,), seed, 0.05, 0.95)
+
+        def thunk():
+            return stats.logistic.ppf(a)
+
+        return thunk(), thunk
+
+    if op == "t_pdf":
+        a = seeded_uniform((n,), seed, -3.0, 3.0)
+
+        def thunk():
+            return stats.t.pdf(a, 5)
+
+        return thunk(), thunk
+
+    if op == "t_cdf":
+        a = seeded_uniform((n,), seed, -3.0, 3.0)
+
+        def thunk():
+            return stats.t.cdf(a, 5)
+
+        return thunk(), thunk
+
+    if op == "t_ppf":
+        a = seeded_uniform((n,), seed, 0.05, 0.95)
+
+        def thunk():
+            return stats.t.ppf(a, 5)
+
+        return thunk(), thunk
+
+    if op == "chi2_pdf":
+        a = seeded_uniform((n,), seed, 0.1, 20.0)
+
+        def thunk():
+            return stats.chi2.pdf(a, 5)
+
+        return thunk(), thunk
+
+    if op == "chi2_cdf":
+        a = seeded_uniform((n,), seed, 0.1, 20.0)
+
+        def thunk():
+            return stats.chi2.cdf(a, 5)
+
+        return thunk(), thunk
+
+    if op == "chi2_ppf":
+        a = seeded_uniform((n,), seed, 0.05, 0.95)
+
+        def thunk():
+            return stats.chi2.ppf(a, 5)
+
+        return thunk(), thunk
+
+    if op == "gamma_pdf":
+        a = seeded_uniform((n,), seed, 0.1, 10.0)
+
+        def thunk():
+            return stats.gamma.pdf(a, 2)
+
+        return thunk(), thunk
+
+    if op == "gamma_cdf":
+        a = seeded_uniform((n,), seed, 0.1, 10.0)
+
+        def thunk():
+            return stats.gamma.cdf(a, 2)
+
+        return thunk(), thunk
+
+    if op == "gamma_ppf":
+        a = seeded_uniform((n,), seed, 0.05, 0.95)
+
+        def thunk():
+            return stats.gamma.ppf(a, 2)
+
+        return thunk(), thunk
+
+    if op == "beta_pdf":
+        a = seeded_uniform((n,), seed, 0.05, 0.95)
+
+        def thunk():
+            return stats.beta.pdf(a, 2, 5)
+
+        return thunk(), thunk
+
+    if op == "beta_cdf":
+        a = seeded_uniform((n,), seed, 0.05, 0.95)
+
+        def thunk():
+            return stats.beta.cdf(a, 2, 5)
+
+        return thunk(), thunk
+
+    if op == "beta_ppf":
+        a = seeded_uniform((n,), seed, 0.05, 0.95)
+
+        def thunk():
+            return stats.beta.ppf(a, 2, 5)
+
+        return thunk(), thunk
+
+    if op == "poisson_pmf":
+        a = np.floor(seeded_uniform((n,), seed, 0.0, 12.0))
+
+        def thunk():
+            return stats.poisson.pmf(a, 3)
+
+        return thunk(), thunk
+
+    if op == "poisson_cdf":
+        a = np.floor(seeded_uniform((n,), seed, 0.0, 12.0))
+
+        def thunk():
+            return stats.poisson.cdf(a, 3)
+
+        return thunk(), thunk
+
+    if op == "binom_pmf":
+        a = np.floor(seeded_uniform((n,), seed, 0.0, 10.0))
+
+        def thunk():
+            return stats.binom.pmf(a, 10, 0.3)
+
+        return thunk(), thunk
+
+    if op == "binom_cdf":
+        a = np.floor(seeded_uniform((n,), seed, 0.0, 10.0))
+
+        def thunk():
+            return stats.binom.cdf(a, 10, 0.3)
+
+        return thunk(), thunk
+
     if op == "entropy":
         a = seeded_uniform((n,), seed, 0.1, 2.0)
 
@@ -644,6 +868,37 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
                 [1.0, 0.0],
                 t_eval=t_eval,
                 method="RK45",
+                rtol=1e-6,
+                atol=1e-9,
+            )
+
+        return thunk(), thunk
+
+    if op == "dblquad":
+        # ∫_0^1 ∫_0^{1-x} (x+y) dy dx = 1/3; SciPy f(y, x)
+
+        def thunk():
+            return sp_integrate.dblquad(
+                lambda y, x: x + y, 0.0, 1.0, lambda x: 0.0, lambda x: 1.0 - x
+            )
+
+        return thunk(), thunk
+
+    if op == "solve_ivp_rk23":
+        n_pts = max(n // 4, 11)
+        t_eval = np.arange(n_pts, dtype=np.float64) * 0.1
+        tf = float(t_eval[-1])
+
+        def fun(_t, y):
+            return [y[1], -y[0]]
+
+        def thunk():
+            return sp_integrate.solve_ivp(
+                fun,
+                (0.0, tf),
+                [1.0, 0.0],
+                t_eval=t_eval,
+                method="RK23",
                 rtol=1e-6,
                 atol=1e-9,
             )

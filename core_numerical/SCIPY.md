@@ -51,6 +51,16 @@ speed checks against SciPy.
 | Python | Rust |
 |--------|------|
 | `stats.norm.pdf` / `cdf` / `ppf` | `rscipy::{norm_pdf,norm_cdf,norm_ppf}` |
+| `stats.uniform.pdf` / `cdf` / `ppf` | `rscipy::{uniform_pdf,uniform_cdf,uniform_ppf}` |
+| `stats.expon.pdf` / `cdf` / `ppf` | `rscipy::{expon_pdf,expon_cdf,expon_ppf}` |
+| `stats.laplace.pdf` / `cdf` / `ppf` | `rscipy::{laplace_pdf,laplace_cdf,laplace_ppf}` |
+| `stats.logistic.pdf` / `cdf` / `ppf` | `rscipy::{logistic_pdf,logistic_cdf,logistic_ppf}` |
+| `stats.t.pdf` / `cdf` / `ppf` | `rscipy::{t_pdf,t_cdf,t_ppf}` |
+| `stats.chi2.pdf` / `cdf` / `ppf` | `rscipy::{chi2_pdf,chi2_cdf,chi2_ppf}` |
+| `stats.gamma.pdf` / `cdf` / `ppf` | `rscipy::{gamma_pdf_shape,gamma_cdf_shape,gamma_ppf_shape}` |
+| `stats.beta.pdf` / `cdf` / `ppf` | `rscipy::{beta_pdf,beta_cdf,beta_ppf}` |
+| `stats.poisson.pmf` / `cdf` | `rscipy::{poisson_pmf,poisson_cdf}` |
+| `stats.binom.pmf` / `cdf` | `rscipy::{binom_pmf,binom_cdf}` |
 | `stats.entropy` | `rscipy::entropy` |
 | `stats.zscore` | `rscipy::zscore` |
 | `stats.rankdata` | `rscipy::rankdata` |
@@ -99,7 +109,9 @@ speed checks against SciPy.
 | `integrate.simpson` | `rscipy::simpson` |
 | `integrate.cumulative_trapezoid` | `rscipy::cumulative_trapezoid` |
 | `integrate.quad` | `rscipy::quad` (adaptive Simpson) |
+| `integrate.dblquad` | `rscipy::dblquad` (nested adaptive Simpson; `f(y,x)`) |
 | `integrate.solve_ivp(..., method='RK45')` | `rscipy::solve_ivp_rk45` |
+| `integrate.solve_ivp(..., method='RK23')` | `rscipy::solve_ivp_rk23` |
 
 ## Setup
 
@@ -129,4 +141,4 @@ python -m core_numerical.scipy_parity.compare --size 64 --iters 20
 
 ## Next
 
-Fuller distributions; `dblquad` / more ODE methods.
+See [`ROADMAP.md`](ROADMAP.md) (full Arrow via `rarrow`).

@@ -7,3 +7,4 @@ description = "Pandas-like tabular API for Rust (1:1 mapping target)"
 
 [dependencies]
 rnumpy = { path = "../rnumpy" }
+rarrow = { path = "../rarrow" }

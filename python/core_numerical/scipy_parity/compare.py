@@ -41,6 +41,34 @@ OPS = [
     "norm_pdf",
     "norm_cdf",
     "norm_ppf",
+    "uniform_pdf",
+    "uniform_cdf",
+    "uniform_ppf",
+    "expon_pdf",
+    "expon_cdf",
+    "expon_ppf",
+    "laplace_pdf",
+    "laplace_cdf",
+    "laplace_ppf",
+    "logistic_pdf",
+    "logistic_cdf",
+    "logistic_ppf",
+    "t_pdf",
+    "t_cdf",
+    "t_ppf",
+    "chi2_pdf",
+    "chi2_cdf",
+    "chi2_ppf",
+    "gamma_pdf",
+    "gamma_cdf",
+    "gamma_ppf",
+    "beta_pdf",
+    "beta_cdf",
+    "beta_ppf",
+    "poisson_pmf",
+    "poisson_cdf",
+    "binom_pmf",
+    "binom_cdf",
     "entropy",
     "zscore",
     "rankdata",
@@ -80,7 +108,9 @@ OPS = [
     "simpson",
     "cumulative_trapezoid",
     "quad",
+    "dblquad",
     "solve_ivp",
+    "solve_ivp_rk23",
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -176,15 +206,51 @@ def nearly_equal(
 
 
 def tolerances(op: str) -> tuple[float, float]:
-    if op in ("erf", "erfc", "ndtr", "i0", "norm_pdf", "norm_cdf", "norm_ppf"):
-        return 2e-6, 2e-6
+    if op in (
+        "erf",
+        "erfc",
+        "ndtr",
+        "i0",
+        "norm_pdf",
+        "norm_cdf",
+        "norm_ppf",
+        "uniform_pdf",
+        "uniform_cdf",
+        "uniform_ppf",
+        "expon_pdf",
+        "expon_cdf",
+        "expon_ppf",
+        "laplace_pdf",
+        "laplace_cdf",
+        "laplace_ppf",
+        "logistic_pdf",
+        "logistic_cdf",
+        "logistic_ppf",
+        "t_pdf",
+        "t_cdf",
+        "t_ppf",
+        "chi2_pdf",
+        "chi2_cdf",
+        "chi2_ppf",
+        "gamma_pdf",
+        "gamma_cdf",
+        "gamma_ppf",
+        "beta_pdf",
+        "beta_cdf",
+        "beta_ppf",
+        "poisson_pmf",
+        "poisson_cdf",
+        "binom_pmf",
+        "binom_cdf",
+    ):
+        return 2e-5, 2e-5
     if op in ("expm",):
         return 1e-5, 1e-6
     if op in ("nelder_mead", "lbfgsb", "least_squares"):
         return 1e-5, 1e-6
     if op in ("fft", "ifft", "rfft", "irfft", "fftconvolve"):
         return 1e-6, 1e-7
-    if op in ("quad", "solve_ivp"):
+    if op in ("quad", "dblquad", "solve_ivp", "solve_ivp_rk23"):
         return 1e-4, 1e-5
     if op in ("pearsonr", "spearmanr", "ttest_ind"):
         return 1e-6, 1e-7

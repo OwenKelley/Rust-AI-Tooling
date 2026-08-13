@@ -48,8 +48,17 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```powershell
 python "example comparisons/mnist_mlp/python/train_mnist.py" --epochs 25
 
+# Save a checkpoint (state_dict + train metadata) for reuse elsewhere:
+python "example comparisons/mnist_mlp/python/train_mnist.py" --epochs 25 --save path\to\mlp_mnist.pt
+
 cargo run --release --manifest-path "example comparisons/mnist_mlp/rust/Cargo.toml" -- --mode naive
 cargo run --release --manifest-path "example comparisons/mnist_mlp/rust/Cargo.toml" -- --mode fast
+
+# RusTorch: save weights / run inference-only
+cargo run --release --manifest-path "example comparisons/mnist_mlp/rust/Cargo.toml" -- `
+  --mode naive --epochs 25 --seed 0 --save path\to\seed_00.bin
+cargo run --release --manifest-path "example comparisons/mnist_mlp/rust/Cargo.toml" -- `
+  --infer --mode naive --checkpoint path\to\seed_00.bin --passes 50
 ```
 
 ## Compare wall clock

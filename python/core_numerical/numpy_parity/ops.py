@@ -433,6 +433,27 @@ def prepare(op: str, size: int, seed: int) -> tuple[Any, Callable[[], Any]]:
             np.float64
         )
 
+    if op == "astype_i64":
+        a = seeded_uniform((n, n), seed, -10.0, 10.0)
+        return a.astype(np.int64).astype(np.float64), lambda: a.astype(np.int64).astype(np.float64)
+
+    if op == "astype_bool":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        return a.astype(np.bool_).astype(np.float64), lambda: a.astype(np.bool_).astype(np.float64)
+
+    if op == "expand_dims":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        return np.expand_dims(a, axis=1), lambda: np.expand_dims(a, axis=1)
+
+    if op == "squeeze":
+        a = seeded_uniform((n, 1, n), seed, -1.0, 1.0)
+        return np.squeeze(a, axis=1), lambda: np.squeeze(a, axis=1)
+
+    if op == "index_axis":
+        a = seeded_uniform((n, n), seed, -1.0, 1.0)
+        idx = n // 2
+        return a[idx, :], lambda: a[idx, :]
+
     raise ValueError(f"unknown op: {op}")
 
 

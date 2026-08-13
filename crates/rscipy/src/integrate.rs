@@ -205,6 +205,34 @@ where
     (left + right, e1 + e2)
 }
 
+/// `scipy.integrate.dblquad(func, a, b, gfun, hfun)`.
+///
+/// Computes ∫_a^b dx ∫_{g(x)}^{h(x)} dy `f(y, x)` (SciPy argument order: `y` then `x`).
+pub fn dblquad<F, G, H>(mut f: F, a: f64, b: f64, mut g: G, mut h: H, eps: f64) -> (f64, f64)
+where
+    F: FnMut(f64, f64) -> f64,
+    G: FnMut(f64) -> f64,
+    H: FnMut(f64) -> f64,
+{
+    assert!(a.is_finite() && b.is_finite());
+    // Outer adaptive Simpson over x; each node runs an inner quad over y.
+    let outer = |x: f64| {
+        let y0 = g(x);
+        let y1 = h(x);
+        if (y1 - y0).abs() < 1e-15 {
+            return 0.0;
+        }
+        let (lo, hi, sign) = if y1 >= y0 {
+            (y0, y1, 1.0)
+        } else {
+            (y1, y0, -1.0)
+        };
+        let (inner, _) = quad(|y| f(y, x), lo, hi, eps * 0.5);
+        sign * inner
+    };
+    quad(outer, a, b, eps)
+}
+
 /// Result of `solve_ivp` (subset of SciPy's `OdeResult`).
 #[derive(Debug, Clone)]
 pub struct OdeResult {
@@ -227,12 +255,48 @@ impl OdeResult {
 /// `f(t, y) -> dy/dt` with `y` as `&[f64]`. Integrates from `t_span=(t0,tf)` and
 /// returns states at `t_eval` (must be within the span, sorted).
 pub fn solve_ivp_rk45<F>(
+    f: F,
+    t_span: (f64, f64),
+    y0: &[f64],
+    t_eval: &[f64],
+    rtol: f64,
+    atol: f64,
+) -> OdeResult
+where
+    F: FnMut(f64, &[f64]) -> Vec<f64>,
+{
+    solve_ivp_adaptive(f, t_span, y0, t_eval, rtol, atol, OdeMethod::Rk45)
+}
+
+/// `scipy.integrate.solve_ivp(..., method='RK23')` (Bogacki–Shampine 3(2)).
+pub fn solve_ivp_rk23<F>(
+    f: F,
+    t_span: (f64, f64),
+    y0: &[f64],
+    t_eval: &[f64],
+    rtol: f64,
+    atol: f64,
+) -> OdeResult
+where
+    F: FnMut(f64, &[f64]) -> Vec<f64>,
+{
+    solve_ivp_adaptive(f, t_span, y0, t_eval, rtol, atol, OdeMethod::Rk23)
+}
+
+#[derive(Clone, Copy)]
+enum OdeMethod {
+    Rk45,
+    Rk23,
+}
+
+fn solve_ivp_adaptive<F>(
     mut f: F,
     t_span: (f64, f64),
     y0: &[f64],
     t_eval: &[f64],
     rtol: f64,
     atol: f64,
+    method: OdeMethod,
 ) -> OdeResult
 where
     F: FnMut(f64, &[f64]) -> Vec<f64>,
@@ -247,7 +311,6 @@ where
     }
     assert!(t_eval[0] >= t0 - 1e-15 && t_eval[t_eval.len() - 1] <= tf + 1e-15);
 
-    // Dormand–Prince 5(4) coefficients
     let mut t = t0;
     let mut y = y0.to_vec();
     let mut nfev = 0usize;
@@ -257,7 +320,6 @@ where
     let mut yout: Vec<Vec<f64>> = vec![Vec::with_capacity(t_eval.len()); n];
     let mut eval_i = 0usize;
 
-    // Record if t_eval starts at t0
     while eval_i < t_eval.len() && (t_eval[eval_i] - t).abs() <= 1e-14 {
         tout.push(t_eval[eval_i]);
         for s in 0..n {
@@ -269,6 +331,10 @@ where
     let max_steps = 1_000_000usize;
     let mut steps = 0usize;
     let mut success = true;
+    let err_exp = match method {
+        OdeMethod::Rk45 => -0.2,
+        OdeMethod::Rk23 => -1.0 / 3.0,
+    };
 
     while eval_i < t_eval.len() && steps < max_steps {
         steps += 1;
@@ -276,11 +342,9 @@ where
             success = false;
             break;
         }
-        // Cap step so we land on the next output time (avoids crude interpolation error).
         let t_target = t_eval[eval_i].min(tf);
         h = h.min(tf - t).min(t_target - t);
         if h <= 0.0 {
-            // Already at/ past target numerically
             if (t - t_eval[eval_i]).abs() <= 1e-12 {
                 tout.push(t_eval[eval_i]);
                 for s in 0..n {
@@ -293,81 +357,11 @@ where
             break;
         }
 
-        let k1 = f(t, &y);
-        nfev += 1;
-        assert_eq!(k1.len(), n);
-
-        let y2 = axpy(&y, &k1, h * (1.0 / 5.0));
-        let k2 = f(t + h * (1.0 / 5.0), &y2);
-        nfev += 1;
-
-        let y3 = comb(
-            &y,
-            &[(&k1, h * (3.0 / 40.0)), (&k2, h * (9.0 / 40.0))],
-        );
-        let k3 = f(t + h * (3.0 / 10.0), &y3);
-        nfev += 1;
-
-        let y4 = comb(
-            &y,
-            &[
-                (&k1, h * (44.0 / 45.0)),
-                (&k2, h * (-56.0 / 15.0)),
-                (&k3, h * (32.0 / 9.0)),
-            ],
-        );
-        let k4 = f(t + h * (4.0 / 5.0), &y4);
-        nfev += 1;
-
-        let y5 = comb(
-            &y,
-            &[
-                (&k1, h * (19372.0 / 6561.0)),
-                (&k2, h * (-25360.0 / 2187.0)),
-                (&k3, h * (64448.0 / 6561.0)),
-                (&k4, h * (-212.0 / 729.0)),
-            ],
-        );
-        let k5 = f(t + h * (8.0 / 9.0), &y5);
-        nfev += 1;
-
-        let y6 = comb(
-            &y,
-            &[
-                (&k1, h * (9017.0 / 3168.0)),
-                (&k2, h * (-355.0 / 33.0)),
-                (&k3, h * (46732.0 / 5247.0)),
-                (&k4, h * (49.0 / 176.0)),
-                (&k5, h * (-5103.0 / 18656.0)),
-            ],
-        );
-        let k6 = f(t + h, &y6);
-        nfev += 1;
-
-        let y_new = comb(
-            &y,
-            &[
-                (&k1, h * (35.0 / 384.0)),
-                (&k3, h * (500.0 / 1113.0)),
-                (&k4, h * (125.0 / 192.0)),
-                (&k5, h * (-2187.0 / 6784.0)),
-                (&k6, h * (11.0 / 84.0)),
-            ],
-        );
-        let k7 = f(t + h, &y_new);
-        nfev += 1;
-
-        let y_err = comb(
-            &y,
-            &[
-                (&k1, h * (5179.0 / 57600.0)),
-                (&k3, h * (7571.0 / 16695.0)),
-                (&k4, h * (393.0 / 640.0)),
-                (&k5, h * (-92097.0 / 339200.0)),
-                (&k6, h * (187.0 / 2100.0)),
-                (&k7, h * (1.0 / 40.0)),
-            ],
-        );
+        let (y_new, y_err, fev) = match method {
+            OdeMethod::Rk45 => rk45_step(&mut f, t, &y, h, n),
+            OdeMethod::Rk23 => rk23_step(&mut f, t, &y, h, n),
+        };
+        nfev += fev;
 
         let mut err = 0.0_f64;
         for i in 0..n {
@@ -392,7 +386,7 @@ where
         let factor = if err == 0.0 {
             2.0
         } else {
-            0.9 * err.powf(-0.2)
+            0.9 * err.powf(err_exp)
         };
         let factor = factor.clamp(0.2, 5.0);
         h *= factor;
@@ -412,6 +406,127 @@ where
         success,
         nfev,
     }
+}
+
+fn rk45_step<F>(f: &mut F, t: f64, y: &[f64], h: f64, n: usize) -> (Vec<f64>, Vec<f64>, usize)
+where
+    F: FnMut(f64, &[f64]) -> Vec<f64>,
+{
+    let mut nfev = 0usize;
+    let k1 = f(t, y);
+    nfev += 1;
+    assert_eq!(k1.len(), n);
+
+    let y2 = axpy(y, &k1, h * (1.0 / 5.0));
+    let k2 = f(t + h * (1.0 / 5.0), &y2);
+    nfev += 1;
+
+    let y3 = comb(y, &[(&k1, h * (3.0 / 40.0)), (&k2, h * (9.0 / 40.0))]);
+    let k3 = f(t + h * (3.0 / 10.0), &y3);
+    nfev += 1;
+
+    let y4 = comb(
+        y,
+        &[
+            (&k1, h * (44.0 / 45.0)),
+            (&k2, h * (-56.0 / 15.0)),
+            (&k3, h * (32.0 / 9.0)),
+        ],
+    );
+    let k4 = f(t + h * (4.0 / 5.0), &y4);
+    nfev += 1;
+
+    let y5 = comb(
+        y,
+        &[
+            (&k1, h * (19372.0 / 6561.0)),
+            (&k2, h * (-25360.0 / 2187.0)),
+            (&k3, h * (64448.0 / 6561.0)),
+            (&k4, h * (-212.0 / 729.0)),
+        ],
+    );
+    let k5 = f(t + h * (8.0 / 9.0), &y5);
+    nfev += 1;
+
+    let y6 = comb(
+        y,
+        &[
+            (&k1, h * (9017.0 / 3168.0)),
+            (&k2, h * (-355.0 / 33.0)),
+            (&k3, h * (46732.0 / 5247.0)),
+            (&k4, h * (49.0 / 176.0)),
+            (&k5, h * (-5103.0 / 18656.0)),
+        ],
+    );
+    let k6 = f(t + h, &y6);
+    nfev += 1;
+
+    let y_new = comb(
+        y,
+        &[
+            (&k1, h * (35.0 / 384.0)),
+            (&k3, h * (500.0 / 1113.0)),
+            (&k4, h * (125.0 / 192.0)),
+            (&k5, h * (-2187.0 / 6784.0)),
+            (&k6, h * (11.0 / 84.0)),
+        ],
+    );
+    let k7 = f(t + h, &y_new);
+    nfev += 1;
+
+    let y_err = comb(
+        y,
+        &[
+            (&k1, h * (5179.0 / 57600.0)),
+            (&k3, h * (7571.0 / 16695.0)),
+            (&k4, h * (393.0 / 640.0)),
+            (&k5, h * (-92097.0 / 339200.0)),
+            (&k6, h * (187.0 / 2100.0)),
+            (&k7, h * (1.0 / 40.0)),
+        ],
+    );
+    (y_new, y_err, nfev)
+}
+
+/// Bogacki–Shampine 3(2) step.
+fn rk23_step<F>(f: &mut F, t: f64, y: &[f64], h: f64, n: usize) -> (Vec<f64>, Vec<f64>, usize)
+where
+    F: FnMut(f64, &[f64]) -> Vec<f64>,
+{
+    let mut nfev = 0usize;
+    let k1 = f(t, y);
+    nfev += 1;
+    assert_eq!(k1.len(), n);
+
+    let y2 = axpy(y, &k1, h * 0.5);
+    let k2 = f(t + 0.5 * h, &y2);
+    nfev += 1;
+
+    let y3 = axpy(y, &k2, h * 0.75);
+    let k3 = f(t + 0.75 * h, &y3);
+    nfev += 1;
+
+    let y_new = comb(
+        y,
+        &[
+            (&k1, h * (2.0 / 9.0)),
+            (&k2, h * (1.0 / 3.0)),
+            (&k3, h * (4.0 / 9.0)),
+        ],
+    );
+    let k4 = f(t + h, &y_new);
+    nfev += 1;
+
+    let y_err = comb(
+        y,
+        &[
+            (&k1, h * (7.0 / 24.0)),
+            (&k2, h * (1.0 / 4.0)),
+            (&k3, h * (1.0 / 3.0)),
+            (&k4, h * (1.0 / 8.0)),
+        ],
+    );
+    (y_new, y_err, nfev)
 }
 
 fn axpy(y: &[f64], k: &[f64], a: f64) -> Vec<f64> {
@@ -472,6 +587,13 @@ mod tests {
     }
 
     #[test]
+    fn dblquad_unit_square() {
+        // ∫_0^1 ∫_0^1 1 dy dx = 1
+        let (v, _) = dblquad(|_y, _x| 1.0, 0.0, 1.0, |_| 0.0, |_| 1.0, 1e-8);
+        assert_close(v, 1.0, 1e-6);
+    }
+
+    #[test]
     fn solve_ivp_exp_decay() {
         // y' = -y, y(0)=1 → y(t)=e^{-t}
         let t_eval: Vec<f64> = (0..11).map(|i| i as f64 * 0.1).collect();
@@ -486,6 +608,23 @@ mod tests {
         assert!(r.success);
         for (i, &t) in t_eval.iter().enumerate() {
             assert_close(r.y[0][i], (-t).exp(), 1e-4);
+        }
+    }
+
+    #[test]
+    fn solve_ivp_rk23_exp_decay() {
+        let t_eval: Vec<f64> = (0..11).map(|i| i as f64 * 0.1).collect();
+        let r = solve_ivp_rk23(
+            |_t, y| vec![-y[0]],
+            (0.0, 1.0),
+            &[1.0],
+            &t_eval,
+            1e-6,
+            1e-9,
+        );
+        assert!(r.success);
+        for (i, &t) in t_eval.iter().enumerate() {
+            assert_close(r.y[0][i], (-t).exp(), 5e-4);
         }
     }
 }

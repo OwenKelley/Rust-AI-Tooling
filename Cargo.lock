@@ -53,10 +53,21 @@ dependencies = [
 name = "parity_runner"
 version = "0.1.0"
 dependencies = [
+ "rarrow",
  "rnumpy",
  "rpandas",
+ "rpolars",
  "rscipy",
+ "rsklearn",
+ "rtokenizers",
  "rustorch",
+]
+
+[[package]]
+name = "rarrow"
+version = "0.1.0"
+dependencies = [
+ "rnumpy",
 ]
 
 [[package]]
@@ -93,6 +104,15 @@ version = "0.1.0"
 name = "rpandas"
 version = "0.1.0"
 dependencies = [
+ "rarrow",
+ "rnumpy",
+]
+
+[[package]]
+name = "rpolars"
+version = "0.1.0"
+dependencies = [
+ "rarrow",
  "rnumpy",
 ]
 
@@ -102,6 +122,17 @@ version = "0.1.0"
 dependencies = [
  "rnumpy",
 ]
+
+[[package]]
+name = "rsklearn"
+version = "0.1.0"
+dependencies = [
+ "rnumpy",
+]
+
+[[package]]
+name = "rtokenizers"
+version = "0.1.0"
 
 [[package]]
 name = "rustorch"

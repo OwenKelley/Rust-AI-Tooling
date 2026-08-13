@@ -357,6 +357,118 @@ impl NdArray {
         }
         NdArrayF32::from_shape_vec(&self.shape, data)
     }
+
+    /// `np.astype(np.int64)` — truncate toward zero.
+    pub fn astype_i64(&self) -> NdArrayI64 {
+        if let Some(s) = self.as_slice() {
+            return NdArrayI64::from_shape_vec(
+                &self.shape,
+                s.iter().map(|&x| x as i64).collect(),
+            );
+        }
+        let mut data = Vec::with_capacity(self.len());
+        for i in 0..self.len() {
+            data.push(self.get_flat(i) as i64);
+        }
+        NdArrayI64::from_shape_vec(&self.shape, data)
+    }
+
+    /// `np.astype(np.bool_)` — nonzero → true.
+    pub fn astype_bool(&self) -> NdArrayBool {
+        if let Some(s) = self.as_slice() {
+            return NdArrayBool::from_shape_vec(
+                &self.shape,
+                s.iter().map(|&x| x != 0.0).collect(),
+            );
+        }
+        let mut data = Vec::with_capacity(self.len());
+        for i in 0..self.len() {
+            data.push(self.get_flat(i) != 0.0);
+        }
+        NdArrayBool::from_shape_vec(&self.shape, data)
+    }
+
+    /// `np.expand_dims(a, axis)` — O(1) strided view.
+    pub fn expand_dims_view(&self, axis: usize) -> Self {
+        assert!(
+            axis <= self.ndim(),
+            "expand_dims: axis {axis} out of bounds for ndim {}",
+            self.ndim()
+        );
+        let mut shape = Vec::with_capacity(self.ndim() + 1);
+        let mut strides = Vec::with_capacity(self.ndim() + 1);
+        for i in 0..axis {
+            shape.push(self.shape[i]);
+            strides.push(self.strides[i]);
+        }
+        shape.push(1);
+        let inserted = if axis < self.ndim() {
+            self.strides[axis]
+        } else {
+            1
+        };
+        strides.push(inserted);
+        for i in axis..self.ndim() {
+            shape.push(self.shape[i]);
+            strides.push(self.strides[i]);
+        }
+        Self::from_parts(Arc::clone(&self.data), shape, strides, self.offset)
+    }
+
+    /// `np.squeeze(a, axis=…)` — O(1) strided view. `None` drops all length-1 axes.
+    pub fn squeeze_view(&self, axis: Option<usize>) -> Self {
+        match axis {
+            Some(ax) => {
+                assert!(ax < self.ndim(), "squeeze: axis out of bounds");
+                assert_eq!(
+                    self.shape[ax], 1,
+                    "cannot select an axis to squeeze out which has size not equal to one"
+                );
+                let mut shape = Vec::with_capacity(self.ndim().saturating_sub(1));
+                let mut strides = Vec::with_capacity(self.ndim().saturating_sub(1));
+                for i in 0..self.ndim() {
+                    if i != ax {
+                        shape.push(self.shape[i]);
+                        strides.push(self.strides[i]);
+                    }
+                }
+                Self::from_parts(Arc::clone(&self.data), shape, strides, self.offset)
+            }
+            None => {
+                let mut shape = Vec::new();
+                let mut strides = Vec::new();
+                for i in 0..self.ndim() {
+                    if self.shape[i] != 1 {
+                        shape.push(self.shape[i]);
+                        strides.push(self.strides[i]);
+                    }
+                }
+                Self::from_parts(Arc::clone(&self.data), shape, strides, self.offset)
+            }
+        }
+    }
+
+    /// Integer index along one axis (NumPy `a.take`/`__getitem__` reducing that axis).
+    /// O(1) strided view — the path that previously forced a copy via `take`.
+    pub fn index_axis_view(&self, axis: usize, index: usize) -> Self {
+        assert!(axis < self.ndim(), "index_axis: axis out of bounds");
+        assert!(
+            index < self.shape[axis],
+            "index_axis: index {index} out of bounds for axis size {}",
+            self.shape[axis]
+        );
+        let offset = self.offset as isize + index as isize * self.strides[axis];
+        assert!(offset >= 0);
+        let mut shape = Vec::with_capacity(self.ndim().saturating_sub(1));
+        let mut strides = Vec::with_capacity(self.ndim().saturating_sub(1));
+        for i in 0..self.ndim() {
+            if i != axis {
+                shape.push(self.shape[i]);
+                strides.push(self.strides[i]);
+            }
+        }
+        Self::from_parts(Arc::clone(&self.data), shape, strides, offset as usize)
+    }
 }
 
 #[inline]
@@ -577,6 +689,90 @@ impl NdArrayF32 {
     }
 }
 
+/// Contiguous `i64` ND array (dtype companion to [`NdArray`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NdArrayI64 {
+    data: Vec<i64>,
+    shape: Vec<usize>,
+}
+
+impl NdArrayI64 {
+    pub fn zeros(shape: &[usize]) -> Self {
+        let n = NdArray::shape_len(shape);
+        Self {
+            data: vec![0; n],
+            shape: shape.to_vec(),
+        }
+    }
+
+    pub fn from_shape_vec(shape: &[usize], data: Vec<i64>) -> Self {
+        assert_eq!(data.len(), NdArray::shape_len(shape));
+        Self {
+            data,
+            shape: shape.to_vec(),
+        }
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn as_slice(&self) -> &[i64] {
+        &self.data
+    }
+
+    pub fn sum(&self) -> i64 {
+        self.data.iter().sum()
+    }
+
+    pub fn astype_f64(&self) -> NdArray {
+        NdArray::from_shape_vec(
+            &self.shape,
+            self.data.iter().map(|&x| x as f64).collect(),
+        )
+    }
+}
+
+/// Contiguous bool ND array (`u8` 0/1 storage; dtype companion to [`NdArray`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NdArrayBool {
+    data: Vec<bool>,
+    shape: Vec<usize>,
+}
+
+impl NdArrayBool {
+    pub fn from_shape_vec(shape: &[usize], data: Vec<bool>) -> Self {
+        assert_eq!(data.len(), NdArray::shape_len(shape));
+        Self {
+            data,
+            shape: shape.to_vec(),
+        }
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn as_slice(&self) -> &[bool] {
+        &self.data
+    }
+
+    pub fn astype_f64(&self) -> NdArray {
+        NdArray::from_shape_vec(
+            &self.shape,
+            self.data.iter().map(|&x| if x { 1.0 } else { 0.0 }).collect(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +799,28 @@ mod tests {
         assert_eq!(s.shape(), &[2, 3]);
         assert_eq!(s.get_flat(0), 3.0);
         assert!(Arc::ptr_eq(&a.data, &s.data));
+    }
+
+    #[test]
+    fn expand_squeeze_index_axis_share_buffer() {
+        let a = NdArray::from_shape_vec(&[2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let e = a.expand_dims_view(1);
+        assert_eq!(e.shape(), &[2, 1, 3]);
+        assert!(Arc::ptr_eq(&a.data, &e.data));
+        let s = e.squeeze_view(Some(1));
+        assert_eq!(s.shape(), &[2, 3]);
+        assert!(Arc::ptr_eq(&a.data, &s.data));
+        let row = a.index_axis_view(0, 1);
+        assert_eq!(row.shape(), &[3]);
+        assert_eq!(row.to_contiguous().as_slice().unwrap(), &[4.0, 5.0, 6.0]);
+        assert!(Arc::ptr_eq(&a.data, &row.data));
+    }
+
+    #[test]
+    fn astype_i64_bool_roundtrip() {
+        let a = NdArray::from_shape_vec(&[3], vec![-1.7, 0.0, 2.9]);
+        assert_eq!(a.astype_i64().as_slice(), &[-1, 0, 2]);
+        assert_eq!(a.astype_bool().as_slice(), &[true, false, true]);
     }
 
     #[test]

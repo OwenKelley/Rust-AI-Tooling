@@ -13,7 +13,7 @@ pub mod manipulation;
 pub mod ops;
 pub mod reductions;
 
-pub use array::{AxisSlice, NdArray, NdArrayF32};
+pub use array::{AxisSlice, NdArray, NdArrayBool, NdArrayF32, NdArrayI64};
 pub use creation::*;
 pub use indexing::*;
 pub use linalg::*;
